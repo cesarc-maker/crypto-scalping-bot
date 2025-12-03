@@ -3,3 +3,5 @@ ccxt
 pandas
 ta
 requests
+flask
+gunicorn
