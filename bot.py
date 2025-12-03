@@ -7,8 +7,8 @@ from telegram import Bot
 # ============================
 # CONFIGURATION
 # ============================
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"   # Where alerts will be sent
+BOT_TOKEN = "8569380534:AAEkT1EAoerEExctT5p_gii0O8FO_Gcc25Q"
+CHAT_ID = "6360969304"   # Where alerts will be sent
 EXCHANGES = ["binance"]             # Start with binance
 SCAN_INTERVAL = 60                  # 1 minute
 PAIR_LIMIT = 40                     # Scan top 40 liquid pairs
