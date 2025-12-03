@@ -2,28 +2,42 @@ import ccxt
 import pandas as pd
 import ta
 import time
+import threading
 from telegram import Bot
+from flask import Flask
 
 # ============================
 # CONFIGURATION
 # ============================
-BOT_TOKEN = "8569380534:AAEkT1EAoerEExctT5p_gii0O8FO_Gcc25Q"
-CHAT_ID = "6360969304"   # Where alerts will be sent
-EXCHANGES = ["binance"]             # Start with binance
-SCAN_INTERVAL = 60                  # 1 minute
-PAIR_LIMIT = 40                     # Scan top 40 liquid pairs
+
+import os
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
+SCAN_INTERVAL = 60          # scan every minute
+PAIR_LIMIT = 40             # top 40 pairs
+EXCHANGES = ["binance"]     # start with binance
 
 bot = Bot(token=BOT_TOKEN)
 
 # ============================
-# HELPER FUNCTIONS
+# FLASK WEB SERVER (for Render)
+# ============================
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Crypto Scalping Bot is running!"
+
+# ============================
+# BOT LOGIC
 # ============================
 
 def fetch_symbols(exchange):
     markets = exchange.load_markets()
-    # USDT spot pairs only
     symbols = [s for s in markets if s.endswith("/USDT") and markets[s]["active"]]
-    return symbols[:PAIR_LIMIT]     # Limit scanning for performance
+    return symbols[:PAIR_LIMIT]
 
 def fetch_ohlcv_df(exchange, symbol, tf="5m", limit=200):
     data = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
@@ -42,72 +56,64 @@ def add_indicators(df):
 
 def detect_trend(df15):
     last = df15.iloc[-1]
-    if (last["ema20"] > last["ema50"] and last["rsi"] > 50 and last["macd_hist"] > 0):
+    if last["ema20"] > last["ema50"] and last["rsi"] > 50 and last["macd_hist"] > 0:
         return "UP"
-    if (last["ema20"] < last["ema50"] and last["rsi"] < 50 and last["macd_hist"] < 0):
+    if last["ema20"] < last["ema50"] and last["rsi"] < 50 and last["macd_hist"] < 0:
         return "DOWN"
     return "NONE"
 
 def check_long_setup(df5):
     last = df5.iloc[-1]
     prev = df5.iloc[-2]
-
+    
     price = last["close"]
-    near_ema = (abs(price - last["ema20"]) / price < 0.003 or
+    near_ema = (abs(price - last["ema20"]) / price < 0.003 or 
                 abs(price - last["ema50"]) / price < 0.003)
 
     rsi_ok = last["rsi"] > 45
     macd_flip = prev["macd_hist"] < 0 and last["macd_hist"] > 0
-
     vol_ok = last["volume"] > last["vol_sma20"] * 0.8
 
-    if near_ema and rsi_ok and macd_flip and vol_ok:
-        return True
-    return False
+    return near_ema and rsi_ok and macd_flip and vol_ok
 
 def check_short_setup(df5):
     last = df5.iloc[-1]
     prev = df5.iloc[-2]
-
+    
     price = last["close"]
-    near_ema = (abs(price - last["ema20"]) / price < 0.003 or
+    near_ema = (abs(price - last["ema20"]) / price < 0.003 or 
                 abs(price - last["ema50"]) / price < 0.003)
 
     rsi_ok = last["rsi"] < 55
     macd_flip = prev["macd_hist"] > 0 and last["macd_hist"] < 0
-
     vol_ok = last["volume"] > last["vol_sma20"] * 0.8
 
-    if near_ema and rsi_ok and macd_flip and vol_ok:
-        return True
-    return False
+    return near_ema and rsi_ok and macd_flip and vol_ok
 
 def send_alert(symbol, direction, price, atr):
     message = f"""
-🔥 SCALPING SETUP DETECTED
+⚡ SCALPING SETUP DETECTED
 
 Pair: {symbol}
 Direction: {direction}
 
-Current Price: {price}
+Price: {price}
 ATR (volatility): {round(atr, 4)}
 
-Structure:
+Conditions:
 - EMA pullback detected
-- RSI & MACD confirm momentum
-- Volume conditions satisfied
+- Momentum confirmed (RSI / MACD)
+- Volume supports move
 
-⚠️ No financial advice. Market conditions change quickly.
+(No financial advice. Market changes fast.)
 """
+    try:
+        bot.send_message(chat_id=CHAT_ID, text=message)
+    except Exception as e:
+        print(f"Error sending message: {e}")
 
-    bot.send_message(chat_id=CHAT_ID, text=message)
-
-# ============================
-# MAIN LOOP
-# ============================
-
-def main():
-    print("Bot started. Scanning crypto markets every minute...")
+def scanner_loop():
+    print("Bot scanner started...")
 
     while True:
         try:
@@ -132,13 +138,25 @@ def main():
                         if trend == "DOWN" and check_short_setup(df5):
                             send_alert(symbol, "SHORT", last5["close"], last5["atr"])
 
-                    except Exception as e:
+                    except Exception:
                         continue
 
             time.sleep(SCAN_INTERVAL)
 
         except Exception as e:
+            print(f"Main loop error: {e}")
             time.sleep(10)
 
+# ============================
+# RUN SCANNER IN BACKGROUND THREAD
+# ============================
+
+threading.Thread(target=scanner_loop, daemon=True).start()
+
+# ============================
+# RUN FLASK SERVER
+# ============================
+
 if __name__ == "__main__":
-    main()
+    app.run(host="0.0.0.0", port=10000)
+
