@@ -11,8 +11,8 @@ from flask import Flask
 # ============================
 
 import os
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+BOT_TOKEN = os.getenv("8569380534:AAEkT1EAoerEExctT5p_gii0O8FO_Gcc25Q")
+CHAT_ID = os.getenv("6360969304")
 
 SCAN_INTERVAL = 60          # scan every minute
 PAIR_LIMIT = 40             # top 40 pairs
