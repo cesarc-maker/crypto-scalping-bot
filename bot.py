@@ -11,7 +11,7 @@ from flask import Flask
 # ============================
 
 import os
-BOT_TOKEN = os.getenv("8569380534:AAEkT1EAoerEExctT5p_gii0O8FO_Gcc25Q")
+BOT_TOKEN = os.getenv("8569380534:AAFNo0zLnKLvo5UZ_taeU-qDUtKqPGUxjIw")
 CHAT_ID = os.getenv("6360969304")
 
 SCAN_INTERVAL = 60          # scan every minute
