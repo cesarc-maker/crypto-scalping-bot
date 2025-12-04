@@ -114,6 +114,7 @@ Conditions:
 
 def scanner_loop():
     print("Bot scanner started...")
+    bot.send_message(chat_id=CHAT_ID, text="Bot is running successfully 🎉")
 
     while True:
         try:
