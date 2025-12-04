@@ -114,7 +114,8 @@ Conditions:
 
 def scanner_loop():
     print("Bot scanner started...")
-    bot.send_message(chat_id=CHAT_ID, text="Bot is running successfully 🎉")
+    import requests
+requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage?chat_id={CHAT_ID}&text=Bot%20is%20running%20successfully%20🎉")
 
     while True:
         try:
