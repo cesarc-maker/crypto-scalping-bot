@@ -1,126 +1,140 @@
+import os
+import time
 import ccxt
 import pandas as pd
-import ta
-import time
-import threading
-from telegram import Bot
 from flask import Flask
+import threading
+import requests
 
-# ============================
+# ======================================================
 # CONFIGURATION
-# ============================
+# ======================================================
 
-import os
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SCAN_INTERVAL = 60          # scan every minute
-PAIR_LIMIT = 40             # top 40 pairs
-EXCHANGES = ["binance"]     # start with binance
+SCAN_INTERVAL = 60              # scan once per minute
+PAIR_LIMIT = 40                 # top pairs
+EXCHANGES = ["binance"]         # start with Binance
 
-bot = Bot(token=BOT_TOKEN)
 
-# ============================
-# FLASK WEB SERVER (for Render)
-# ============================
+# ======================================================
+# TELEGRAM ALERT FUNCTION (synchronous)
+# ======================================================
 
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Crypto Scalping Bot is running!"
-
-# ============================
-# BOT LOGIC
-# ============================
-
-def fetch_symbols(exchange):
-    markets = exchange.load_markets()
-    symbols = [s for s in markets if s.endswith("/USDT") and markets[s]["active"]]
-    return symbols[:PAIR_LIMIT]
-
-def fetch_ohlcv_df(exchange, symbol, tf="5m", limit=200):
-    data = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
-    df = pd.DataFrame(data, columns=["time", "open", "high", "low", "close", "volume"])
-    return df
-
-def add_indicators(df):
-    df["ema20"] = ta.trend.ema_indicator(df["close"], window=20)
-    df["ema50"] = ta.trend.ema_indicator(df["close"], window=50)
-    df["rsi"] = ta.momentum.rsi(df["close"])
-    macd = ta.trend.MACD(df["close"])
-    df["macd_hist"] = macd.macd_diff()
-    df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"])
-    df["vol_sma20"] = df["volume"].rolling(20).mean()
-    return df
-
-def detect_trend(df15):
-    last = df15.iloc[-1]
-    if last["ema20"] > last["ema50"] and last["rsi"] > 50 and last["macd_hist"] > 0:
-        return "UP"
-    if last["ema20"] < last["ema50"] and last["rsi"] < 50 and last["macd_hist"] < 0:
-        return "DOWN"
-    return "NONE"
-
-def check_long_setup(df5):
-    last = df5.iloc[-1]
-    prev = df5.iloc[-2]
-    
-    price = last["close"]
-    near_ema = (abs(price - last["ema20"]) / price < 0.003 or 
-                abs(price - last["ema50"]) / price < 0.003)
-
-    rsi_ok = last["rsi"] > 45
-    macd_flip = prev["macd_hist"] < 0 and last["macd_hist"] > 0
-    vol_ok = last["volume"] > last["vol_sma20"] * 0.8
-
-    return near_ema and rsi_ok and macd_flip and vol_ok
-
-def check_short_setup(df5):
-    last = df5.iloc[-1]
-    prev = df5.iloc[-2]
-    
-    price = last["close"]
-    near_ema = (abs(price - last["ema20"]) / price < 0.003 or 
-                abs(price - last["ema50"]) / price < 0.003)
-
-    rsi_ok = last["rsi"] < 55
-    macd_flip = prev["macd_hist"] > 0 and last["macd_hist"] < 0
-    vol_ok = last["volume"] > last["vol_sma20"] * 0.8
-
-    return near_ema and rsi_ok and macd_flip and vol_ok
-
-def send_alert(symbol, direction, price, atr):
-    message = f"""
-⚡ SCALPING SETUP DETECTED
-
-Pair: {symbol}
-Direction: {direction}
-
-Price: {price}
-ATR (volatility): {round(atr, 4)}
-
-Conditions:
-- EMA pullback detected
-- Momentum confirmed (RSI / MACD)
-- Volume supports move
-
-(No financial advice. Market changes fast.)
-"""
+def send_telegram_message(text):
     try:
-        bot.send_message(chat_id=CHAT_ID, text=message)
+        url = (
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            f"?chat_id={CHAT_ID}&text={text}"
+        )
+        requests.get(url)
     except Exception as e:
         print(f"Error sending message: {e}")
 
+
+# ======================================================
+# SCALPING SYSTEM LOGIC
+# ======================================================
+
+def fetch_ohlcv_df(exchange, symbol, timeframe):
+    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
+    df = pd.DataFrame(
+        data, columns=["timestamp", "open", "high", "low", "close", "volume"]
+    )
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    return df
+
+
+def add_indicators(df):
+    df["ema20"] = df["close"].ewm(span=20).mean()
+    df["ema50"] = df["close"].ewm(span=50).mean()
+    df["rsi"] = compute_rsi(df["close"], 14)
+    df["atr"] = compute_atr(df)
+    return df
+
+
+def compute_rsi(series, length=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(length).mean()
+    avg_loss = loss.rolling(length).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def compute_atr(df):
+    df["H-L"] = df["high"] - df["low"]
+    df["H-PC"] = abs(df["high"] - df["close"].shift(1))
+    df["L-PC"] = abs(df["low"] - df["close"].shift(1))
+    tr = df[["H-L", "H-PC", "L-PC"]].max(axis=1)
+    return tr.rolling(14).mean()
+
+
+def detect_trend(df):
+    if df["ema20"].iloc[-1] > df["ema50"].iloc[-1]:
+        return "UP"
+    if df["ema20"].iloc[-1] < df["ema50"].iloc[-1]:
+        return "DOWN"
+    return "NONE"
+
+
+def check_long_setup(df):
+    last = df.iloc[-1]
+    return (
+        last["close"] > last["ema20"] and
+        last["rsi"] < 70 and
+        last["close"] - last["ema20"] < last["atr"]
+    )
+
+
+def check_short_setup(df):
+    last = df.iloc[-1]
+    return (
+        last["close"] < last["ema20"] and
+        last["rsi"] > 30 and
+        last["ema20"] - last["close"] < last["atr"]
+    )
+
+
+def fetch_symbols(exchange):
+    try:
+        markets = exchange.load_markets()
+        usdt_pairs = [s for s in markets if s.endswith("USDT")]
+        return usdt_pairs[:PAIR_LIMIT]
+    except:
+        return []
+
+
+def send_alert(symbol, direction, price, atr):
+    message = (
+        f"{direction} signal detected for {symbol}\n"
+        f"Price: {price}\nATR: {atr}\n\n"
+        f"Timeframe: 5m"
+    )
+    send_telegram_message(message)
+    print(f"Sent alert → {symbol} {direction}")
+
+
+# ======================================================
+# MAIN SCANNER LOOP
+# ======================================================
+
 def scanner_loop():
     print("Bot scanner started...")
-    import requests
-requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage?chat_id={CHAT_ID}&text=Bot%20is%20running%20successfully%20🎉")
+
+    # Send startup confirmation
+    try:
+        send_telegram_message("Bot is running successfully 🎉")
+    except:
+        pass
 
     while True:
         try:
             for ex_name in EXCHANGES:
                 exchange = getattr(ccxt, ex_name)()
+
                 symbols = fetch_symbols(exchange)
 
                 for symbol in symbols:
@@ -140,25 +154,34 @@ requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage?chat_id={CHAT
                         if trend == "DOWN" and check_short_setup(df5):
                             send_alert(symbol, "SHORT", last5["close"], last5["atr"])
 
-                    except Exception:
+                    except Exception as inner_err:
+                        print(f"Error in symbol loop: {inner_err}")
                         continue
 
             time.sleep(SCAN_INTERVAL)
 
-        except Exception as e:
-            print(f"Main loop error: {e}")
+        except Exception as outer_err:
+            print(f"Main loop error: {outer_err}")
             time.sleep(10)
 
-# ============================
-# RUN SCANNER IN BACKGROUND THREAD
-# ============================
+
+# ======================================================
+# START BACKGROUND THREAD (REQUIRED FOR RENDER)
+# ======================================================
 
 threading.Thread(target=scanner_loop, daemon=True).start()
 
-# ============================
-# RUN FLASK SERVER
-# ============================
+
+# ======================================================
+# FLASK SERVER FOR RENDER
+# ======================================================
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running."
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
-
