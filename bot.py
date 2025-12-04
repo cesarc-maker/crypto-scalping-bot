@@ -123,4 +123,108 @@ def fetch_symbols(exchange):
         markets = exchange.load_markets()
         return [s for s in markets if s.endswith("USDT")][:PAIR_LIMIT]
     except:
-        return
+        return []
+
+
+# ======================================================
+# SEND SIGNAL WITH TP / SL
+# ======================================================
+
+def send_signal(symbol, direction, price, atr):
+    atr = float(atr)
+
+    # --- LONG SETUP ---
+    if direction == "LONG":
+        sl = price - (1.5 * atr)
+        tp1 = price + (1 * atr)
+        tp2 = price + (2 * atr)
+        tp3 = price + (3 * atr)
+
+    # --- SHORT SETUP ---
+    else:
+        sl = price + (1.5 * atr)
+        tp1 = price - (1 * atr)
+        tp2 = price - (2 * atr)
+        tp3 = price - (3 * atr)
+
+    message = (
+        f"🔥 {direction} Signal Detected\n\n"
+        f"Pair: {symbol}\n"
+        f"Price: {price}\n"
+        f"ATR: {round(atr, 4)}\n"
+        f"Timeframe: 5m\n\n"
+        f"📍 Stop Loss: {round(sl, 4)}\n\n"
+        f"🎯 Take Profits:\n"
+        f"• TP1: {round(tp1, 4)} (1× ATR)\n"
+        f"• TP2: {round(tp2, 4)} (2× ATR)\n"
+        f"• TP3: {round(tp3, 4)} (3× ATR)\n\n"
+        f"⚠️ For analysis only — you decide what to do."
+    )
+
+    send_telegram_message(message)
+    print(f"Sent alert → {symbol} {direction}")
+
+
+# ======================================================
+# MAIN SCANNER LOOP
+# ======================================================
+
+def scanner_loop():
+    print("Bot scanner started...")
+
+    send_telegram_message("Bot is running successfully 🎉")
+
+    while True:
+        try:
+            for ex_name in EXCHANGES:
+                exchange = getattr(ccxt, ex_name)()
+                symbols = fetch_symbols(exchange)
+
+                for symbol in symbols:
+                    try:
+                        df15 = add_indicators(fetch_ohlcv_df(exchange, symbol, "15m"))
+                        df5 = add_indicators(fetch_ohlcv_df(exchange, symbol, "5m"))
+
+                        trend = detect_trend(df15)
+                        if trend == "NONE":
+                            continue
+
+                        last5 = df5.iloc[-1]
+
+                        if trend == "UP" and check_long_setup(df5):
+                            send_signal(symbol, "LONG", last5["close"], last5["atr"])
+
+                        if trend == "DOWN" and check_short_setup(df5):
+                            send_signal(symbol, "SHORT", last5["close"], last5["atr"])
+
+                    except Exception as e:
+                        print(f"Symbol error: {e}")
+                        continue
+
+            time.sleep(SCAN_INTERVAL)
+
+        except Exception as err:
+            print(f"Scanner error: {err}")
+            time.sleep(10)
+
+
+# ======================================================
+# START SCANNER THREAD
+# ======================================================
+
+threading.Thread(target=scanner_loop, daemon=True).start()
+
+
+# ======================================================
+# FLASK SERVER (REQUIRED FOR RENDER)
+# ======================================================
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running."
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
