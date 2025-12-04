@@ -33,6 +33,7 @@ EXCHANGES = [
 def send_telegram_message(text, chat_id=None):
     if chat_id is None:
         chat_id = CHAT_ID
+
     try:
         url = (
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -84,7 +85,7 @@ def add_indicators(df):
 
 
 # ======================================================
-# TREND LOGIC
+# TREND LOGIC (15m)
 # ======================================================
 
 def detect_trend(df15):
@@ -97,37 +98,61 @@ def detect_trend(df15):
 
 
 # ======================================================
-# LESS AGGRESSIVE SIGNAL LOGIC (1:2 RR Compatible)
+# STRICT MODE SIGNAL LOGIC (very low noise, high confidence)
 # ======================================================
 
 def check_long_setup(df5):
     last = df5.iloc[-1]
     prev = df5.iloc[-2]
+    prev2 = df5.iloc[-3]
 
-    ema_trend = last["ema20"] > prev["ema20"]
-    ema_position = last["close"] > last["ema20"]
-    rsi_ok = 40 < last["rsi"] < 70
-    bullish_candle = last["close"] > last["open"]
-    atr_ok = last["atr"] > 0
+    # EMA20 must accelerate upward
+    ema_slope = (last["ema20"] - prev["ema20"]) > (prev["ema20"] - prev2["ema20"])
 
-    return ema_trend and ema_position and rsi_ok and bullish_candle and atr_ok
+    # Price must close clearly above EMA20 (0.2% buffer)
+    ema_position = last["close"] > last["ema20"] * 1.002
+
+    # RSI must be in strong upward momentum zone
+    rsi_ok = 50 < last["rsi"] < 65
+
+    # Candle body must be > 60% of its total range
+    body = last["close"] - last["open"]
+    candle_range = last["high"] - last["low"]
+    bullish_strong = (body > 0) and (body > 0.6 * candle_range)
+
+    # ATR must be expanding (volatility increasing)
+    atr_ok = last["atr"] > prev["atr"]
+
+    return ema_slope and ema_position and rsi_ok and bullish_strong and atr_ok
 
 
 def check_short_setup(df5):
     last = df5.iloc[-1]
     prev = df5.iloc[-2]
+    prev2 = df5.iloc[-3]
 
-    ema_trend = last["ema20"] < prev["ema20"]
-    ema_position = last["close"] < last["ema20"]
-    rsi_ok = 30 < last["rsi"] < 60
-    bearish_candle = last["close"] < last["open"]
-    atr_ok = last["atr"] > 0
+    # EMA20 must accelerate downward
+    ema_slope = (prev["ema20"] - last["ema20"]) > (prev2["ema20"] - prev["ema20"])
 
-    return ema_trend and ema_position and rsi_ok and bearish_candle and atr_ok
+    # Price must close clearly below EMA20 (0.2% buffer)
+    ema_position = last["close"] < last["ema20"] * 0.998
+
+    # RSI must be in strong downward momentum zone
+    rsi_ok = 35 < last["rsi"] < 50
+
+    # Candle body must be > 60% of its range AND bearish
+    body = last["open"] - last["close"]
+    candle_range = last["high"] - last["low"]
+    bearish_strong = (body > 0) and (body > 0.6 * candle_range)
+
+    # ATR must be rising (strong movement potential)
+    atr_ok = last["atr"] > prev["atr"]
+
+    return ema_slope and ema_position and rsi_ok and bearish_strong and atr_ok
 
 
 # ======================================================
-# MULTI-EXCHANGE USDT PAIRS
+# EXCHANGE FORMATTING
 # ======================================================
 
 def get_exchange(name):
@@ -144,13 +169,13 @@ def get_exchange(name):
 def fetch_usdt_pairs(exchange):
     try:
         markets = exchange.load_markets()
-        return [s for s in markets if s.endswith("USDT")][:PAIR_LIMIT]
+        return [s for s in markets if isinstance(s, str) and s.endswith("USDT")][:PAIR_LIMIT]
     except:
         return []
 
 
 # ======================================================
-# SEND SIGNAL (WITH 1:2 RR TP/SL)
+# SIGNAL SENDER (1:2 RR)
 # ======================================================
 
 def send_signal(symbol, direction, price, atr):
@@ -159,43 +184,43 @@ def send_signal(symbol, direction, price, atr):
     if direction == "LONG":
         sl = price - (1.5 * atr)
         tp1 = price + (1 * atr)
-        tp2 = price + (2 * atr)
+        tp2 = price + (2 * atr)  # 1:2 RR
         tp3 = price + (3 * atr)
     else:
         sl = price + (1.5 * atr)
         tp1 = price - (1 * atr)
-        tp2 = price - (2 * atr)
+        tp2 = price - (2 * atr)  # 1:2 RR
         tp3 = price - (3 * atr)
 
     message = (
-        f"🔥 {direction} Signal Detected\n\n"
+        f"🔥 STRICT {direction} Signal\n\n"
         f"Pair: {symbol}\n"
         f"Price: {price}\n"
-        f"ATR: {round(atr, 4)}\n"
-        f"Timeframe: 5m\n\n"
+        f"ATR: {round(atr, 4)}\n\n"
         f"📍 Stop Loss: {round(sl, 4)}\n\n"
         f"🎯 Take Profits:\n"
         f"• TP1: {round(tp1, 4)}\n"
         f"• TP2: {round(tp2, 4)} (1:2 RR)\n"
         f"• TP3: {round(tp3, 4)}\n\n"
-        f"⚠️ Informational only."
+        f"⚠️ Informational analysis only."
     )
 
     send_telegram_message(message)
-    print(f"Sent alert → {symbol} {direction}")
+    print(f"Sent STRICT alert → {symbol} {direction}")
 
 
 # ======================================================
-# MARKET SCANNER
+# SCANNER LOOP
 # ======================================================
 
 def scanner_loop():
     print("Bot scanner started...")
-    send_telegram_message("Bot is running successfully 🎉")
+    send_telegram_message("STRICT MODE bot is running 🎉")
 
     while True:
         try:
             for ex_name in EXCHANGES:
+
                 ex = get_exchange(ex_name)
                 if ex is None:
                     continue
@@ -231,7 +256,7 @@ def scanner_loop():
 
 
 # ======================================================
-# WEBHOOK TELEGRAM COMMANDS
+# TELEGRAM WEBHOOK COMMANDS
 # ======================================================
 
 app = Flask(__name__)
@@ -248,10 +273,10 @@ def webhook():
         text = data["message"].get("text", "")
 
         if text == "/start":
-            send_telegram_message("Bot active. Use /status to check health.", chat_id)
+            send_telegram_message("STRICT bot active. Use /status to check.", chat_id)
 
         if text == "/status":
-            send_telegram_message("📡 Bot online. Scanning markets live.", chat_id)
+            send_telegram_message("📡 STRICT MODE bot online, scanning high-quality setups only.", chat_id)
 
         if text == "/help":
             send_telegram_message(
@@ -266,23 +291,23 @@ def webhook():
 
 
 # ======================================================
-# THREAD STARTER
+# START SCANNER THREAD
 # ======================================================
 
 threading.Thread(target=scanner_loop, daemon=True).start()
 
 
 # ======================================================
-# FLASK ROOT
+# ROOT ENDPOINT
 # ======================================================
 
 @app.route("/")
 def home():
-    return "Bot is running (Mode 2 – Less Aggressive – 1:2 RR)."
+    return "STRICT MODE bot running — ultra-filtered signals."
 
 
 # ======================================================
-# RUN SERVER FOR RENDER
+# RUN SERVER (RENDER)
 # ======================================================
 
 if __name__ == "__main__":
