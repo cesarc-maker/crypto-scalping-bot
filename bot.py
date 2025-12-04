@@ -17,7 +17,6 @@ CHAT_ID = os.getenv("CHAT_ID")
 SCAN_INTERVAL = 60
 PAIR_LIMIT = 50
 
-# Mode 2 – Moderate signals across top USDT sources
 EXCHANGES = [
     "binance",
     "binance_futures",
@@ -85,7 +84,7 @@ def add_indicators(df):
 
 
 # ======================================================
-# TREND & SIGNAL LOGIC (MODE 2)
+# TREND LOGIC
 # ======================================================
 
 def detect_trend(df15):
@@ -97,28 +96,38 @@ def detect_trend(df15):
     return "NONE"
 
 
+# ======================================================
+# LESS AGGRESSIVE SIGNAL LOGIC (1:2 RR Compatible)
+# ======================================================
+
 def check_long_setup(df5):
     last = df5.iloc[-1]
-    ema_pullback = (
-        last["close"] > last["ema20"] or
-        last["close"] > last["ema50"]
-    )
-    rsi_ok = last["rsi"] < 80
-    return ema_pullback and rsi_ok
+    prev = df5.iloc[-2]
+
+    ema_trend = last["ema20"] > prev["ema20"]
+    ema_position = last["close"] > last["ema20"]
+    rsi_ok = 40 < last["rsi"] < 70
+    bullish_candle = last["close"] > last["open"]
+    atr_ok = last["atr"] > 0
+
+    return ema_trend and ema_position and rsi_ok and bullish_candle and atr_ok
 
 
 def check_short_setup(df5):
     last = df5.iloc[-1]
-    ema_pullback = (
-        last["close"] < last["ema20"] or
-        last["close"] < last["ema50"]
-    )
-    rsi_ok = last["rsi"] > 20
-    return ema_pullback and rsi_ok
+    prev = df5.iloc[-2]
+
+    ema_trend = last["ema20"] < prev["ema20"]
+    ema_position = last["close"] < last["ema20"]
+    rsi_ok = 30 < last["rsi"] < 60
+    bearish_candle = last["close"] < last["open"]
+    atr_ok = last["atr"] > 0
+
+    return ema_trend and ema_position and rsi_ok and bearish_candle and atr_ok
 
 
 # ======================================================
-# MULTI-EXCHANGE USDT PAIR FETCHING
+# MULTI-EXCHANGE USDT PAIRS
 # ======================================================
 
 def get_exchange(name):
@@ -128,21 +137,20 @@ def get_exchange(name):
         if name == "bybit":
             return ccxt.bybit({"options": {"defaultType": "linear"}})
         return getattr(ccxt, name)()
-    except Exception as e:
-        print(f"Exchange load error: {e}")
+    except:
         return None
 
 
 def fetch_usdt_pairs(exchange):
     try:
         markets = exchange.load_markets()
-        return [s for s in markets if isinstance(s, str) and s.endswith("USDT")][:PAIR_LIMIT]
+        return [s for s in markets if s.endswith("USDT")][:PAIR_LIMIT]
     except:
         return []
 
 
 # ======================================================
-# TP / SL + SIGNAL SENDER
+# SEND SIGNAL (WITH 1:2 RR TP/SL)
 # ======================================================
 
 def send_signal(symbol, direction, price, atr):
@@ -168,9 +176,9 @@ def send_signal(symbol, direction, price, atr):
         f"📍 Stop Loss: {round(sl, 4)}\n\n"
         f"🎯 Take Profits:\n"
         f"• TP1: {round(tp1, 4)}\n"
-        f"• TP2: {round(tp2, 4)}\n"
+        f"• TP2: {round(tp2, 4)} (1:2 RR)\n"
         f"• TP3: {round(tp3, 4)}\n\n"
-        f"⚠️ For informational purposes only."
+        f"⚠️ Informational only."
     )
 
     send_telegram_message(message)
@@ -178,7 +186,7 @@ def send_signal(symbol, direction, price, atr):
 
 
 # ======================================================
-# SCANNER LOOP
+# MARKET SCANNER
 # ======================================================
 
 def scanner_loop():
@@ -188,7 +196,6 @@ def scanner_loop():
     while True:
         try:
             for ex_name in EXCHANGES:
-
                 ex = get_exchange(ex_name)
                 if ex is None:
                     continue
@@ -224,7 +231,7 @@ def scanner_loop():
 
 
 # ======================================================
-# WEBHOOK COMMAND HANDLER
+# WEBHOOK TELEGRAM COMMANDS
 # ======================================================
 
 app = Flask(__name__)
@@ -241,16 +248,16 @@ def webhook():
         text = data["message"].get("text", "")
 
         if text == "/start":
-            send_telegram_message("Bot is active and running. Use /status to check scan health.", chat_id)
+            send_telegram_message("Bot active. Use /status to check health.", chat_id)
 
         if text == "/status":
-            send_telegram_message("📡 Bot is online and scanning markets in real-time.", chat_id)
+            send_telegram_message("📡 Bot online. Scanning markets live.", chat_id)
 
         if text == "/help":
             send_telegram_message(
                 "Commands:\n"
                 "/start - Activate bot\n"
-                "/status - Check scan status\n"
+                "/status - Check bot health\n"
                 "/help - Show commands",
                 chat_id
             )
@@ -259,23 +266,23 @@ def webhook():
 
 
 # ======================================================
-# START SCANNER THREAD
+# THREAD STARTER
 # ======================================================
 
 threading.Thread(target=scanner_loop, daemon=True).start()
 
 
 # ======================================================
-# FLASK ROOT ENDPOINT
+# FLASK ROOT
 # ======================================================
 
 @app.route("/")
 def home():
-    return "Bot is running with Mode 2 + Webhooks."
+    return "Bot is running (Mode 2 – Less Aggressive – 1:2 RR)."
 
 
 # ======================================================
-# RUN FLASK SERVER (RENDER)
+# RUN SERVER FOR RENDER
 # ======================================================
 
 if __name__ == "__main__":
