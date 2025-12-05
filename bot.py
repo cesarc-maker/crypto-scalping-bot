@@ -14,8 +14,8 @@ import requests
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SCAN_INTERVAL = 60     # scans every minute
-PAIR_LIMIT = 50        # scans top 50 USDT pairs per exchange
+SCAN_INTERVAL = 60      # Scan every 60 seconds
+PAIR_LIMIT = 50         # Scan top 50 USDT pairs on each exchange
 
 EXCHANGES = [
     "binance",
@@ -43,22 +43,19 @@ def send_telegram_message(text, chat_id=None):
 
 
 # ======================================================
-# MARKET DATA + INDICATORS
+# DATA + INDICATORS
 # ======================================================
 
 def fetch_ohlcv_df(exchange, symbol, timeframe):
     data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=120)
-    df = pd.DataFrame(
-        data,
-        columns=["timestamp","open","high","low","close","volume"]
-    )
+    df = pd.DataFrame(data, columns=["timestamp","open","high","low","close","volume"])
     return add_indicators(df)
 
 
 def compute_rsi(series, length=14):
     delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gain  = delta.clip(lower=0)
+    loss  = -delta.clip(upper=0)
     avg_gain = gain.rolling(length).mean()
     avg_loss = loss.rolling(length).mean()
     rs = avg_gain / (avg_loss + 1e-10)
@@ -66,7 +63,7 @@ def compute_rsi(series, length=14):
 
 
 def compute_atr(df):
-    df["H-L"] = df["high"] - df["low"]
+    df["H-L"]  = df["high"] - df["low"]
     df["H-PC"] = abs(df["high"] - df["close"].shift(1))
     df["L-PC"] = abs(df["low"] - df["close"].shift(1))
     tr = df[["H-L","H-PC","L-PC"]].max(axis=1)
@@ -77,8 +74,8 @@ def add_indicators(df):
     df.columns = ["timestamp","open","high","low","close","volume"]
     df["ema20"] = df["close"].ewm(span=20).mean()
     df["ema50"] = df["close"].ewm(span=50).mean()
-    df["rsi"] = compute_rsi(df["close"], 14)
-    df["atr"] = compute_atr(df)
+    df["rsi"]   = compute_rsi(df["close"], 14)
+    df["atr"]   = compute_atr(df)
     return df
 
 
@@ -96,58 +93,58 @@ def trend_direction(df):
 
 
 # ======================================================
-# STRICTER CLEAN TREND SCALPING — LONG LOGIC
+# STRICTER LONG SETUP
 # ======================================================
 
 def check_long_setup(df5):
     last = df5.iloc[-1]
     prev = df5.iloc[-2]
 
-    # 1️⃣ Trend must be bullish
-    if last["ema20"] <= last["ema50"]:
+    # 1️⃣ Strong trend: EMA20 must be 0.15% above EMA50
+    if not (last["ema20"] > last["ema50"] * 1.0015):
         return False
 
-    # 2️⃣ RSI slightly stricter
-    if not (48 < last["rsi"] < 63):
+    # 2️⃣ RSI stricter (50–62)
+    if not (50 < last["rsi"] < 62):
         return False
 
-    # 3️⃣ Candle body strength ≥ 45% of range
-    body = last["close"] - last["open"]
+    # 3️⃣ Candle body strength ≥ 50% of range
+    body  = last["close"] - last["open"]
     range_ = last["high"] - last["low"]
-    if not (body > 0 and body >= 0.45 * range_):
+    if not (body > 0 and body >= 0.50 * range_):
         return False
 
-    # 4️⃣ Must close above previous candle (momentum continuation)
-    if last["close"] <= prev["close"]:
+    # 4️⃣ Momentum continuation (close > prev_close by 0.05%)
+    if not (last["close"] > prev["close"] * 1.0005):
         return False
 
     return True
 
 
 # ======================================================
-# STRICTER CLEAN TREND SCALPING — SHORT LOGIC
+# STRICTER SHORT SETUP
 # ======================================================
 
 def check_short_setup(df5):
     last = df5.iloc[-1]
     prev = df5.iloc[-2]
 
-    # 1️⃣ Trend must be bearish
-    if last["ema20"] >= last["ema50"]:
+    # 1️⃣ Strong downtrend: EMA20 must be 0.15% below EMA50
+    if not (last["ema20"] < last["ema50"] * 0.9985):
         return False
 
-    # 2️⃣ RSI slightly stricter
-    if not (37 < last["rsi"] < 52):
+    # 2️⃣ RSI stricter (38–50)
+    if not (38 < last["rsi"] < 50):
         return False
 
-    # 3️⃣ Candle body strength ≥ 45% of range
-    body = last["open"] - last["close"]
+    # 3️⃣ Candle body strength ≥ 50% of range
+    body  = last["open"] - last["close"]
     range_ = last["high"] - last["low"]
-    if not (body > 0 and body >= 0.45 * range_):
+    if not (body > 0 and body >= 0.50 * range_):
         return False
 
-    # 4️⃣ Must close below previous close
-    if last["close"] >= prev["close"]:
+    # 4️⃣ Momentum continuation (close < prev_close by 0.05%)
+    if not (last["close"] < prev["close"] * 0.9995):
         return False
 
     return True
@@ -181,34 +178,33 @@ def fetch_usdt_pairs(exchange):
 # ======================================================
 
 def send_signal(symbol, direction, price, atr):
-
     atr = float(atr)
 
     if direction == "LONG":
-        sl = price - (1.5 * atr)
+        sl  = price - (1.5 * atr)
         tp1 = price + atr
         tp2 = price + (2 * atr)
         tp3 = price + (3 * atr)
     else:
-        sl = price + (1.5 * atr)
+        sl  = price + (1.5 * atr)
         tp1 = price - atr
         tp2 = price - (2 * atr)
         tp3 = price - (3 * atr)
 
     msg = (
-        f"🔥 {direction} SIGNAL\n\n"
+        f"🔥 STRICT {direction} SIGNAL\n\n"
         f"Pair: {symbol}\n"
-        f"Price: {price}\n"
+        f"Entry: {price}\n"
         f"ATR: {round(atr,4)}\n\n"
         f"SL: {round(sl,4)}\n"
         f"TP1: {round(tp1,4)}\n"
         f"TP2: {round(tp2,4)} (1:2 RR)\n"
         f"TP3: {round(tp3,4)}\n"
-        f"⚠ informational only."
+        f"⚠ Informational only."
     )
 
     send_telegram_message(msg)
-    print("SIGNAL →", symbol, direction)
+    print(f"SIGNAL → {symbol} {direction}")
 
 
 # ======================================================
@@ -221,14 +217,11 @@ def scanner_loop():
     while True:
         try:
             for ex_name in EXCHANGES:
-
                 ex = get_exchange(ex_name)
                 if ex is None:
                     continue
 
-                symbols = fetch_usdt_pairs(ex)
-
-                for symbol in symbols:
+                for symbol in fetch_usdt_pairs(ex):
 
                     try:
                         df5 = fetch_ohlcv_df(ex, symbol, "5m")
@@ -254,7 +247,7 @@ def scanner_loop():
 
 
 # ======================================================
-# TELEGRAM WEBHOOKS
+# TELEGRAM WEBHOOK
 # ======================================================
 
 app = Flask(__name__)
@@ -265,12 +258,13 @@ def webhook():
     if not data:
         return "OK"
 
-    msg = data.get("message", {})
-    chat_id = msg.get("chat", {}).get("id")
+    msg  = data.get("message", {})
+    chat = msg.get("chat", {})
+    chat_id = chat.get("id")
     text = msg.get("text","")
 
     if text == "/start":
-        send_telegram_message("Bot Online — Stricter Trend Scalping Enabled", chat_id)
+        send_telegram_message("Bot Online — Stricter Clean Trend Mode Enabled.", chat_id)
 
     elif text == "/status":
         send_telegram_message("📡 Bot Running & Scanning...", chat_id)
@@ -278,7 +272,7 @@ def webhook():
     elif text == "/help":
         send_telegram_message(
             "/start — Activate Bot\n"
-            "/status — Bot Health\n"
+            "/status — Check Bot\n"
             "/help — Commands",
             chat_id
         )
@@ -287,14 +281,14 @@ def webhook():
 
 
 # ======================================================
-# START THREAD
+# START SCANNER THREAD
 # ======================================================
 
 threading.Thread(target=scanner_loop, daemon=True).start()
 
 
 # ======================================================
-# FLASK SERVER FOR RENDER
+# RENDER WEB SERVER
 # ======================================================
 
 @app.route("/")
