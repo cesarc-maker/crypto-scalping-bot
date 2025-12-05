@@ -47,7 +47,7 @@ def send_telegram_message(text, chat_id=None):
 # ======================================================
 
 def fetch_ohlcv_df(exchange, symbol, timeframe):
-    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=150)
+    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=120)
     df = pd.DataFrame(data, columns=["timestamp","open","high","low","close","volume"])
     return add_indicators(df)
 
@@ -93,40 +93,28 @@ def trend_direction(df):
 
 
 # ======================================================
-# MAX-PROFIT LONG SETUP
+# SLIGHTLY STRICTER LONG SETUP
 # ======================================================
 
 def check_long_setup(df5):
     last = df5.iloc[-1]
     prev = df5.iloc[-2]
 
-    # 1️⃣ Strong bullish trend: EMA separation
-    if not (last["ema20"] > last["ema50"] * 1.0025):   # 0.25% separation
+    # 1️⃣ Stronger trend: EMA20 must be 0.20% above EMA50
+    if not (last["ema20"] > last["ema50"] * 1.0020):
         return False
 
-    # 2️⃣ RSI expansion momentum
-    if not (52 < last["rsi"] < 68):
+    # 2️⃣ Tighter RSI: 51–61
+    if not (51 < last["rsi"] < 61):
         return False
 
-    # 3️⃣ Power candle (60% body)
+    # 3️⃣ Candle body ≥ 55% of range
     body  = last["close"] - last["open"]
     range_ = last["high"] - last["low"]
-    if not (body > 0 and body >= 0.60 * range_):
+    if not (body > 0 and body >= 0.55 * range_):
         return False
 
-    # 4️⃣ Micro-breakout (break previous 2 highs)
-    if not (last["close"] > max(prev["high"], df5.iloc[-3]["high"])):
-        return False
-
-    # 5️⃣ ATR explosion (10% increase)
-    if not (last["atr"] >= prev["atr"] * 1.10):
-        return False
-
-    # 6️⃣ Expected big move (≥1% move potential)
-    if not (last["atr"] * 3 >= last["close"] * 0.01):
-        return False
-
-    # 7️⃣ Momentum continuation: close higher by 0.07%
+    # 4️⃣ Stronger momentum continuation (0.07%)
     if not (last["close"] > prev["close"] * 1.0007):
         return False
 
@@ -134,40 +122,28 @@ def check_long_setup(df5):
 
 
 # ======================================================
-# MAX-PROFIT SHORT SETUP
+# SLIGHTLY STRICTER SHORT SETUP
 # ======================================================
 
 def check_short_setup(df5):
     last = df5.iloc[-1]
     prev = df5.iloc[-2]
 
-    # 1️⃣ Strong bearish trend: EMA separation
-    if not (last["ema20"] < last["ema50"] * 0.9975):
+    # 1️⃣ Stronger downtrend: EMA20 must be 0.20% below EMA50
+    if not (last["ema20"] < last["ema50"] * 0.9980):
         return False
 
-    # 2️⃣ RSI expansion bearish zone
-    if not (32 < last["rsi"] < 48):
+    # 2️⃣ Tighter RSI: 39–49
+    if not (39 < last["rsi"] < 49):
         return False
 
-    # 3️⃣ Power candle (60% body)
+    # 3️⃣ Candle body ≥ 55% of range
     body  = last["open"] - last["close"]
     range_ = last["high"] - last["low"]
-    if not (body > 0 and body >= 0.60 * range_):
+    if not (body > 0 and body >= 0.55 * range_):
         return False
 
-    # 4️⃣ Micro-breakdown (break previous 2 lows)
-    if not (last["close"] < min(prev["low"], df5.iloc[-3]["low"])):
-        return False
-
-    # 5️⃣ ATR explosion (10% increase)
-    if not (last["atr"] >= prev["atr"] * 1.10):
-        return False
-
-    # 6️⃣ Expected big move (≥1% potential)
-    if not (last["atr"] * 3 >= last["close"] * 0.01):
-        return False
-
-    # 7️⃣ Momentum continuation: closes lower by 0.07%
+    # 4️⃣ Stronger momentum continuation (0.07%)
     if not (last["close"] < prev["close"] * 0.9993):
         return False
 
@@ -198,36 +174,37 @@ def fetch_usdt_pairs(exchange):
 
 
 # ======================================================
-# SEND SIGNAL
+# SIGNAL SENDER
 # ======================================================
 
 def send_signal(symbol, direction, price, atr):
+    atr = float(atr)
 
     if direction == "LONG":
-        sl  = price - (2 * atr)
-        tp1 = price + (2 * atr)
-        tp2 = price + (4 * atr)
-        tp3 = price + (6 * atr)
+        sl  = price - (1.5 * atr)
+        tp1 = price + atr
+        tp2 = price + (2 * atr)
+        tp3 = price + (3 * atr)
     else:
-        sl  = price + (2 * atr)
-        tp1 = price - (2 * atr)
-        tp2 = price - (4 * atr)
-        tp3 = price - (6 * atr)
+        sl  = price + (1.5 * atr)
+        tp1 = price - atr
+        tp2 = price - (2 * atr)
+        tp3 = price - (3 * atr)
 
     msg = (
-        f"🔥 MAX-PROFIT {direction} SIGNAL\n\n"
+        f"🔥 STRICT {direction} SIGNAL\n\n"
         f"Pair: {symbol}\n"
         f"Entry: {price}\n"
         f"ATR: {round(atr,4)}\n\n"
-        f"SL:  {round(sl,4)}\n"
+        f"SL: {round(sl,4)}\n"
         f"TP1: {round(tp1,4)}\n"
-        f"TP2: {round(tp2,4)}\n"
+        f"TP2: {round(tp2,4)} (1:2 RR)\n"
         f"TP3: {round(tp3,4)}\n"
-        f"⚠ High-momentum informational analysis only."
+        f"⚠ Informational only."
     )
 
     send_telegram_message(msg)
-    print("SIGNAL →", symbol, direction)
+    print(f"SIGNAL → {symbol} {direction}")
 
 
 # ======================================================
@@ -235,7 +212,7 @@ def send_signal(symbol, direction, price, atr):
 # ======================================================
 
 def scanner_loop():
-    send_telegram_message("🚀 MAX-PROFIT Bot Activated (Very Selective)")
+    send_telegram_message("🚀 Bot Active (Slightly Stricter Trend Scalping Mode)")
 
     while True:
         try:
@@ -249,7 +226,7 @@ def scanner_loop():
                     try:
                         df5 = fetch_ohlcv_df(ex, symbol, "5m")
                         trend = trend_direction(df5)
-                        last  = df5.iloc[-1]
+                        last = df5.iloc[-1]
 
                         if trend == "UP" and check_long_setup(df5):
                             send_signal(symbol, "LONG", last["close"], last["atr"])
@@ -276,23 +253,24 @@ app = Flask(__name__)
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
-    if not data: 
+    if not data:
         return "OK"
 
-    msg      = data.get("message", {})
-    chat_id  = msg.get("chat", {}).get("id")
-    text     = msg.get("text","")
+    msg  = data.get("message", {})
+    chat = msg.get("chat", {})
+    chat_id = chat.get("id")
+    text = msg.get("text","")
 
     if text == "/start":
-        send_telegram_message("Bot Online — MAX-PROFIT Mode Enabled.", chat_id)
+        send_telegram_message("Bot Online — Slightly Stricter Trend Mode Enabled.", chat_id)
 
     elif text == "/status":
-        send_telegram_message("📡 Bot Running (Very Selective)...", chat_id)
+        send_telegram_message("📡 Bot Running & Scanning...", chat_id)
 
     elif text == "/help":
         send_telegram_message(
-            "/start — Start Bot\n"
-            "/status — Bot Status\n"
+            "/start — Activate Bot\n"
+            "/status — Check Bot\n"
             "/help — Commands",
             chat_id
         )
@@ -301,7 +279,7 @@ def webhook():
 
 
 # ======================================================
-# START SCANNER
+# START SCANNER THREAD
 # ======================================================
 
 threading.Thread(target=scanner_loop, daemon=True).start()
@@ -313,7 +291,7 @@ threading.Thread(target=scanner_loop, daemon=True).start()
 
 @app.route("/")
 def home():
-    return "MAX-PROFIT Bot Running"
+    return "Bot Running (Slightly Stricter Trend Scalping Mode)"
 
 
 if __name__ == "__main__":
