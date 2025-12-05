@@ -93,58 +93,58 @@ def trend_direction(df):
 
 
 # ======================================================
-# SLIGHTLY STRICTER LONG SETUP
+# STRICTER LONG SETUP
 # ======================================================
 
 def check_long_setup(df5):
     last = df5.iloc[-1]
     prev = df5.iloc[-2]
 
-    # 1️⃣ Stronger trend: EMA20 must be 0.20% above EMA50
-    if not (last["ema20"] > last["ema50"] * 1.0020):
+    # Stronger trend: EMA20 must be 0.25% above EMA50
+    if not (last["ema20"] > last["ema50"] * 1.0025):
         return False
 
-    # 2️⃣ Tighter RSI: 51–61
-    if not (51 < last["rsi"] < 61):
+    # Tighter RSI: 52–60
+    if not (52 < last["rsi"] < 60):
         return False
 
-    # 3️⃣ Candle body ≥ 55% of range
-    body  = last["close"] - last["open"]
+    # Candle body ≥ 60% of range
+    body = last["close"] - last["open"]
     range_ = last["high"] - last["low"]
-    if not (body > 0 and body >= 0.55 * range_):
+    if not (body > 0 and body >= 0.60 * range_):
         return False
 
-    # 4️⃣ Stronger momentum continuation (0.07%)
-    if not (last["close"] > prev["close"] * 1.0007):
+    # Stronger continuation: +0.10%
+    if not (last["close"] > prev["close"] * 1.0010):
         return False
 
     return True
 
 
 # ======================================================
-# SLIGHTLY STRICTER SHORT SETUP
+# STRICTER SHORT SETUP
 # ======================================================
 
 def check_short_setup(df5):
     last = df5.iloc[-1]
     prev = df5.iloc[-2]
 
-    # 1️⃣ Stronger downtrend: EMA20 must be 0.20% below EMA50
-    if not (last["ema20"] < last["ema50"] * 0.9980):
+    # Stronger downtrend: EMA20 must be 0.25% below EMA50
+    if not (last["ema20"] < last["ema50"] * 0.9975):
         return False
 
-    # 2️⃣ Tighter RSI: 39–49
-    if not (39 < last["rsi"] < 49):
+    # Tighter RSI: 40–48
+    if not (40 < last["rsi"] < 48):
         return False
 
-    # 3️⃣ Candle body ≥ 55% of range
-    body  = last["open"] - last["close"]
+    # Bear candle ≥ 60% body
+    body = last["open"] - last["close"]
     range_ = last["high"] - last["low"]
-    if not (body > 0 and body >= 0.55 * range_):
+    if not (body > 0 and body >= 0.60 * range_):
         return False
 
-    # 4️⃣ Stronger momentum continuation (0.07%)
-    if not (last["close"] < prev["close"] * 0.9993):
+    # Stronger continuation: -0.10%
+    if not (last["close"] < prev["close"] * 0.9990):
         return False
 
     return True
@@ -212,7 +212,7 @@ def send_signal(symbol, direction, price, atr):
 # ======================================================
 
 def scanner_loop():
-    send_telegram_message("🚀 Bot Active (Slightly Stricter Trend Scalping Mode)")
+    send_telegram_message("🚀 Bot Active (Stricter Trend Scalping Mode)")
 
     while True:
         try:
@@ -257,12 +257,11 @@ def webhook():
         return "OK"
 
     msg  = data.get("message", {})
-    chat = msg.get("chat", {})
-    chat_id = chat.get("id")
+    chat_id = msg.get("chat", {}).get("id")
     text = msg.get("text","")
 
     if text == "/start":
-        send_telegram_message("Bot Online — Slightly Stricter Trend Mode Enabled.", chat_id)
+        send_telegram_message("Bot Online — Stricter Trend Mode Enabled.", chat_id)
 
     elif text == "/status":
         send_telegram_message("📡 Bot Running & Scanning...", chat_id)
@@ -291,7 +290,7 @@ threading.Thread(target=scanner_loop, daemon=True).start()
 
 @app.route("/")
 def home():
-    return "Bot Running (Slightly Stricter Trend Scalping Mode)"
+    return "Bot Running (Stricter Trend Scalping Mode)"
 
 
 if __name__ == "__main__":
