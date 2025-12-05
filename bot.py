@@ -27,7 +27,7 @@ EXCHANGES = [
 
 
 # ======================================================
-# TELEGRAM ALERT
+# TELEGRAM ALERTS
 # ======================================================
 
 def send_telegram_message(text, chat_id=None):
@@ -43,7 +43,7 @@ def send_telegram_message(text, chat_id=None):
 
 
 # ======================================================
-# OHLCV + INDICATORS
+# MARKET DATA + INDICATORS
 # ======================================================
 
 def fetch_ohlcv_df(exchange, symbol, timeframe):
@@ -105,7 +105,7 @@ def detect_trend_1h(df):
 
 
 # ======================================================
-# SUPPORT / RESISTANCE (SWING POINTS)
+# SUPPORT/RESISTANCE LEVELS
 # ======================================================
 
 def find_recent_swing_high(df, lookback=12):
@@ -116,7 +116,7 @@ def find_recent_swing_low(df, lookback=12):
 
 
 # ======================================================
-# STRICT SMART-MONEY LONG LOGIC
+# LESS-STRICT SMART-MONEY LONG LOGIC
 # ======================================================
 
 def check_long_setup(df5):
@@ -124,34 +124,33 @@ def check_long_setup(df5):
     prev = df5.iloc[-2]
     prev2 = df5.iloc[-3]
 
-    # 1️⃣ LIQUIDITY SWEEP (stop-hunt)
+    # 1️⃣ Liquidity sweep stays
     swept_low = last["low"] < prev["low"]
     reclaimed = last["close"] > last["ema20"]
     liquidity_sweep_ok = swept_low and reclaimed
 
-    # 2️⃣ EMA20 acceleration
-    ema_slope = (last["ema20"] - prev["ema20"]) > (prev["ema20"] - prev2["ema20"]) * 1.2
+    # 2️⃣ EMA acceleration softened
+    ema_slope = (last["ema20"] - prev["ema20"]) > (prev["ema20"] - prev2["ema20"]) * 1.05
 
-    # 3️⃣ Breakout beyond prior swing high
-    swing_high = find_recent_swing_high(df5)
-    breakout_ok = last["close"] > swing_high * 1.001
+    # 3️⃣ Removed swing breakout requirement
+    breakout_ok = True
 
-    # 4️⃣ Clear close above EMA20 (0.3% buffer)
-    ema_position = last["close"] > last["ema20"] * 1.003
+    # 4️⃣ Price above EMA20 by 0.2%
+    ema_position = last["close"] > last["ema20"] * 1.002
 
-    # 5️⃣ RSI momentum
-    rsi_ok = 55 < last["rsi"] < 70
+    # 5️⃣ Wider RSI for momentum
+    rsi_ok = 50 < last["rsi"] < 72
 
-    # 6️⃣ Strong bullish candle body
+    # 6️⃣ Candle strength relaxed to 55%
     body = last["close"] - last["open"]
     range_ = last["high"] - last["low"]
-    bullish_strong = body > 0 and body > 0.7 * range_
+    bullish_strong = body > 0 and body > 0.55 * range_
 
-    # 7️⃣ ATR expansion
-    atr_ok = last["atr"] > prev["atr"] * 1.15
+    # 7️⃣ ATR expansion softened
+    atr_ok = last["atr"] > prev["atr"] * 1.05
 
-    # 8️⃣ Expected move potential
-    expected_ok = last["atr"] * 3 < last["close"] * 0.02
+    # 8️⃣ Expected move range loosened
+    expected_ok = last["atr"] * 3 < last["close"] * 0.025
 
     return (
         liquidity_sweep_ok
@@ -166,7 +165,7 @@ def check_long_setup(df5):
 
 
 # ======================================================
-# STRICT SMART-MONEY SHORT LOGIC
+# LESS-STRICT SMART-MONEY SHORT LOGIC
 # ======================================================
 
 def check_short_setup(df5):
@@ -174,34 +173,33 @@ def check_short_setup(df5):
     prev = df5.iloc[-2]
     prev2 = df5.iloc[-3]
 
-    # 1️⃣ LIQUIDITY SWEEP
+    # 1️⃣ Liquidity sweep stays
     swept_high = last["high"] > prev["high"]
     rejected = last["close"] < last["ema20"]
     liquidity_sweep_ok = swept_high and rejected
 
-    # 2️⃣ EMA20 acceleration downward
-    ema_slope = (prev["ema20"] - last["ema20"]) > (prev2["ema20"] - prev["ema20"]) * 1.2
+    # 2️⃣ EMA acceleration softened
+    ema_slope = (prev["ema20"] - last["ema20"]) > (prev2["ema20"] - prev["ema20"]) * 1.05
 
-    # 3️⃣ Breakdown below swing low
-    swing_low = find_recent_swing_low(df5)
-    breakdown_ok = last["close"] < swing_low * 0.999
+    # 3️⃣ Remove mandatory breakdown
+    breakdown_ok = True
 
-    # 4️⃣ Clear move below EMA20
-    ema_position = last["close"] < last["ema20"] * 0.997
+    # 4️⃣ Close below EMA20 by 0.2%
+    ema_position = last["close"] < last["ema20"] * 0.998
 
-    # 5️⃣ RSI momentum
-    rsi_ok = 30 < last["rsi"] < 45
+    # 5️⃣ RSI softened for bearish momentum
+    rsi_ok = 28 < last["rsi"] < 48
 
-    # 6️⃣ Strong bearish candle body
+    # 6️⃣ Candle strength relaxed to 55%
     body = last["open"] - last["close"]
     range_ = last["high"] - last["low"]
-    bearish_strong = body > 0 and body > 0.7 * range_
+    bearish_strong = body > 0 and body > 0.55 * range_
 
-    # 7️⃣ ATR expansion
-    atr_ok = last["atr"] > prev["atr"] * 1.15
+    # 7️⃣ ATR expansion softened
+    atr_ok = last["atr"] > prev["atr"] * 1.05
 
-    # 8️⃣ Expected move potential
-    expected_ok = last["atr"] * 3 < last["close"] * 0.02
+    # 8️⃣ Expected move loosened
+    expected_ok = last["atr"] * 3 < last["close"] * 0.025
 
     return (
         liquidity_sweep_ok
@@ -216,15 +214,15 @@ def check_short_setup(df5):
 
 
 # ======================================================
-# EXCHANGES
+# EXCHANGE HANDLING
 # ======================================================
 
 def get_exchange(name):
     try:
         if name == "binance_futures":
-            return ccxt.binance({"options": {"defaultType":"future"}})
+            return ccxt.binance({"options":{"defaultType":"future"}})
         if name == "bybit":
-            return ccxt.bybit({"options": {"defaultType":"linear"}})
+            return ccxt.bybit({"options":{"defaultType":"linear"}})
         return getattr(ccxt, name)()
     except:
         return None
@@ -239,7 +237,7 @@ def fetch_usdt_pairs(exchange):
 
 
 # ======================================================
-# SIGNAL DISPATCH
+# SIGNAL DISPATCH (TP/SL)
 # ======================================================
 
 def send_signal(symbol, direction, price, atr):
@@ -258,7 +256,7 @@ def send_signal(symbol, direction, price, atr):
         tp3 = price - (3 * atr)
 
     msg = (
-        f"🔥 ADVANCED {direction} Signal\n\n"
+        f"🔥 SIGNAL ({direction})\n\n"
         f"Pair: {symbol}\n"
         f"Price: {price}\n"
         f"ATR: {round(atr,4)}\n\n"
@@ -266,7 +264,7 @@ def send_signal(symbol, direction, price, atr):
         f"TP1: {round(tp1,4)}\n"
         f"TP2: {round(tp2,4)} (1:2 RR)\n"
         f"TP3: {round(tp3,4)}\n\n"
-        f"⚠️ Informational only."
+        f"⚠ Informational only."
     )
 
     send_telegram_message(msg)
@@ -274,11 +272,11 @@ def send_signal(symbol, direction, price, atr):
 
 
 # ======================================================
-# SCANNER LOOP
+# MAIN SCANNER LOOP
 # ======================================================
 
 def scanner_loop():
-    send_telegram_message("🚀 ADVANCED SMC Bot Activated")
+    send_telegram_message("🚀 Bot Activated (Less Strict High-Momentum Mode)")
 
     while True:
         try:
@@ -297,10 +295,9 @@ def scanner_loop():
 
                         trend15 = detect_trend(df15)
                         trend1h = detect_trend_1h(df1h)
-
                         last5 = df5.iloc[-1]
 
-                        # LONG: 5m + 15m + 1h all UP
+                        # LONG conditions
                         if (
                             trend15 == "UP"
                             and trend1h == "UP"
@@ -308,7 +305,7 @@ def scanner_loop():
                         ):
                             send_signal(symbol, "LONG", last5["close"], last5["atr"])
 
-                        # SHORT: 5m + 15m + 1h all DOWN
+                        # SHORT conditions
                         if (
                             trend15 == "DOWN"
                             and trend1h == "DOWN"
@@ -327,7 +324,7 @@ def scanner_loop():
 
 
 # ======================================================
-# WEBHOOK COMMANDS
+# TELEGRAM WEBHOOKS
 # ======================================================
 
 app = Flask(__name__)
@@ -338,19 +335,21 @@ def webhook():
     if not data:
         return "OK"
 
-    message = data.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
-    text = message.get("text", "")
+    msg = data.get("message", {})
+    chat_id = msg.get("chat", {}).get("id")
+    text = msg.get("text", "")
 
     if text == "/start":
-        send_telegram_message("Bot Online. Advanced Mode Enabled.", chat_id)
+        send_telegram_message("Bot Online. Less Strict High-Momentum Mode.", chat_id)
+
     elif text == "/status":
-        send_telegram_message("📡 Bot Running. Scanning Markets.", chat_id)
+        send_telegram_message("📡 Bot Running & Scanning.", chat_id)
+
     elif text == "/help":
         send_telegram_message(
-            "/start - Activate bot\n"
-            "/status - Check bot health\n"
-            "/help - Show commands",
+            "/start - Activate Bot\n"
+            "/status - Check Status\n"
+            "/help - Commands",
             chat_id
         )
 
@@ -358,19 +357,19 @@ def webhook():
 
 
 # ======================================================
-# THREAD START
+# START THREAD
 # ======================================================
 
 threading.Thread(target=scanner_loop, daemon=True).start()
 
 
 # ======================================================
-# RENDER SERVER
+# WEB SERVER FOR RENDER
 # ======================================================
 
 @app.route("/")
 def home():
-    return "Advanced Smart-Money Bot Running"
+    return "Bot Running (Less Strict High-Momentum Mode)"
 
 
 if __name__ == "__main__":
