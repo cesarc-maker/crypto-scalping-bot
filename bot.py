@@ -14,45 +14,38 @@ TELEGRAM_TOKEN = "YOUR_TELEGRAM_TOKEN"
 TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
 
 SCAN_INTERVAL = 30   # You chose 30 seconds
-TIMEFRAME = "1m"     # 1-minute early signals
-LIMIT = 50           # enough for indicators
+TIMEFRAME = "1m"
+LIMIT = 50
 
 
 # ============================================================
-# TELEGRAM FUNCTION
+# TELEGRAM SENDER
 # ============================================================
 
 def tg(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
     except:
         pass
 
 
 # ============================================================
-# EXCHANGES (ALL MAJOR ONES)
+# EXCHANGES THAT WORK ON RENDER
 # ============================================================
 
-binance = ccxt.binance()
-binance_futures = ccxt.binanceusdm()
-bybit = ccxt.bybit()
-kucoin = ccxt.kucoin()
 okx = ccxt.okx()
+kucoin = ccxt.kucoin()
+bitget = ccxt.bitget()
+mexc = ccxt.mexc()
 
-EXCHANGES = [
-    binance,
-    binance_futures,
-    bybit,
-    kucoin,
-    okx
-]
+EXCHANGES = [okx, kucoin, bitget, mexc]
 
-print("[INIT] Loaded exchanges:", [type(x).__name__ for x in EXCHANGES])
+print("[INIT] Using OKX, KuCoin, Bitget, MEXC")
 
 
 # ============================================================
-# SYMBOL LOADER — LOAD ALL USDT SYMBOLS FROM ALL EXCHANGES
+# LOAD ALL AVAILABLE USDT SYMBOLS
 # ============================================================
 
 def load_all_symbols():
@@ -63,15 +56,16 @@ def load_all_symbols():
             markets = ex.load_markets()
             for s in markets:
                 if "USDT" in s:
-                    clean = s.replace("/", "").replace(":USDT","")
+                    clean = s.replace("/", "").replace(":USDT", "")
                     symbols.add(clean)
         except Exception as e:
             print(f"[ERROR loading markets from {type(ex).__name__}] {e}")
 
     return symbols
 
+
 ALL_PAIRS = load_all_symbols()
-print(f"[INIT] Loaded {len(ALL_PAIRS)} symbols across all exchanges")
+print(f"[INIT] Loaded {len(ALL_PAIRS)} tradable symbols.\n")
 
 
 # ============================================================
@@ -84,7 +78,7 @@ def ema(values, length):
 def true_range(h, l, c):
     tr = []
     for i in range(1, len(c)):
-        tr.append(max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])))
+        tr.append(max(h[i] - l[i], abs(h[i] - c[i-1]), abs(l[i] - c[i-1])))
     return np.array(tr)
 
 def atr(h, l, c, period=14):
@@ -93,14 +87,13 @@ def atr(h, l, c, period=14):
 
 
 # ============================================================
-# ANTI-DUPLICATE (OPTION C - NEW BREAKOUT LEVEL REQUIRED)
+# ANTI-DUPLICATE SYSTEM
 # ============================================================
 
-last_breakout_level = {}     # symbol → price of last breakout zone
-signal_timestamps = {}       # symbol → list of timestamps
-
-MAX_ALERTS_2H = 2
-WINDOW = 2 * 60 * 60  # 2 hours
+last_breakout_level = {}
+signal_times = {}
+MAX_DUPES = 2
+WINDOW = 7200  # 2 hours
 
 
 def allow_signal(symbol, breakout_level):
@@ -108,52 +101,51 @@ def allow_signal(symbol, breakout_level):
 
     if symbol not in last_breakout_level:
         last_breakout_level[symbol] = None
-    if symbol not in signal_timestamps:
-        signal_timestamps[symbol] = []
+    if symbol not in signal_times:
+        signal_times[symbol] = []
 
-    # Reject same breakout zone again
+    # Reject same breakout
     if last_breakout_level[symbol] == breakout_level:
         return False
 
-    # Purge old timestamps
-    signal_timestamps[symbol] = [
-        ts for ts in signal_timestamps[symbol]
-        if now - ts < WINDOW
-    ]
+    # Remove old timestamps
+    signal_times[symbol] = [ts for ts in signal_times[symbol] if now - ts < WINDOW]
 
-    # Check limit
-    if len(signal_timestamps[symbol]) >= MAX_ALERTS_2H:
+    # Cap at 2 per 2 hours
+    if len(signal_times[symbol]) >= MAX_DUPES:
         return False
 
-    # Approve new signal
+    # Update metadata
     last_breakout_level[symbol] = breakout_level
-    signal_timestamps[symbol].append(now)
+    signal_times[symbol].append(now)
     return True
 
 
 # ============================================================
-# BREAKOUT LOGIC
+# FETCH OHLCV FROM ALL EXCHANGES
 # ============================================================
 
-def fetch_from_all_exchanges(symbol):
-    """Try each exchange until data is found."""
+def fetch_candles(symbol):
     for ex in EXCHANGES:
         try:
-            ohlcv = ex.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
-            if ohlcv:
-                return ohlcv
+            data = ex.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
+            if data:
+                return data
         except:
             continue
     return None
 
 
+# ============================================================
+# BREAKOUT LOGIC (LONG & SHORT SEPARATED)
+# ============================================================
+
 def check_symbol(symbol):
-    ohlcv = fetch_from_all_exchanges(symbol)
+    ohlcv = fetch_candles(symbol)
     if ohlcv is None:
         return
 
     df = pd.DataFrame(ohlcv, columns=["time","open","high","low","close","volume"])
-
     if len(df) < 30:
         return
 
@@ -161,96 +153,143 @@ def check_symbol(symbol):
     high = df["high"].values
     low = df["low"].values
     vol = df["volume"].values
-    op = df["open"].values
+    openp = df["open"].values
 
-    # Trend filter (EMA20/50 on 1m)
+    # Trend
     ema20 = ema(close, 20)
     ema50 = ema(close, 50)
+
     trend_long = ema20[-1] > ema50[-1]
     trend_short = ema20[-1] < ema50[-1]
 
-    # ATR
+    # ATR Explosion
     atr_vals = atr(high, low, close, 14)
     atr_now = atr_vals[-1]
     atr_prev = atr_vals[-2]
     atr_exp = atr_now >= atr_prev * 1.20
 
-    # Volume expansion
+    # Volume Expansion
     vol_sma20 = pd.Series(vol).rolling(20).mean().values
-    vol_exp = vol[-1] > vol_sma20[-1] * 1.5
+    vol_exp_long = vol[-1] > vol_sma20[-1] * 1.5
+    vol_exp_short = vol[-1] > vol_sma20[-1] * 1.3  # looser for shorts
 
-    # Power candle
-    body = close - op
+    # Candle strength
+    body = close - openp
     rng = high - low
-    power = (abs(body) / rng) > 0.65
+    power_long = (abs(body) / rng) > 0.65
+    power_short = (abs(body) / rng) > 0.70  # stricter for shorts
 
-    # Microstructure breakout
+    # Wick logic for SHORT
+    upper_wick = high[-1] - max(openp[-1], close[-1])
+    lower_wick = min(openp[-1], close[-1]) - low[-1]
+    bearish_wick = upper_wick >= (lower_wick * 2)
+
+    # Microstructure
     last3high = max(high[-4:-1])
     last3low = min(low[-4:-1])
     price = close[-1]
 
-    # LONG
-    if price > last3high and atr_exp and vol_exp and power.iloc[-1] and trend_long:
+    # ===========================
+    # 🟢 LONG ENTRY
+    # ===========================
+    if (
+        price > last3high and
+        atr_exp and
+        vol_exp_long and
+        power_long and
+        trend_long
+    ):
         if allow_signal(symbol, last3high):
-            send_breakout(symbol, "LONG", price, atr_now)
+            send_long_signal(symbol, price, atr_now)
 
-    # SHORT
-    if price < last3low and atr_exp and vol_exp and power.iloc[-1] and trend_short:
+    # ===========================
+    # 🔴 SHORT ENTRY (enhanced logic)
+    # ===========================
+    if (
+        price < last3low and
+        atr_exp and
+        vol_exp_short and
+        power_short and
+        trend_short and
+        bearish_wick
+    ):
         if allow_signal(symbol, last3low):
-            send_breakout(symbol, "SHORT", price, atr_now)
+            send_short_signal(symbol, price, atr_now)
 
 
 # ============================================================
-# SEND ALERT
+# SEND LONG SIGNAL
 # ============================================================
 
-def send_breakout(symbol, side, price, atr_val):
+def send_long_signal(symbol, price, atr_val):
+
     msg = (
-        f"🚨 BREAKOUT SIGNAL\n"
-        f"{symbol} — {side}\n\n"
-        f"Entry: {price:.4f}\n"
-        f"ATR: {atr_val:.4f}\n\n"
-        f"TP1: {(price + 2*atr_val) if side=='LONG' else (price - 2*atr_val):.4f}\n"
-        f"TP2: {(price + 4*atr_val) if side=='LONG' else (price - 4*atr_val):.4f}\n"
-        f"TP3: {(price + 6*atr_val) if side=='LONG' else (price - 6*atr_val):.4f}\n"
-        f"TP4: {(price +10*atr_val) if side=='LONG' else (price -10*atr_val):.4f}\n\n"
-        f"SL: {(price - 2*atr_val) if side=='LONG' else (price + 2*atr_val):.4f}"
+        f"🟢 *LONG BREAKOUT*\n"
+        f"Symbol: `{symbol}`\n\n"
+        f"Entry: *{price:.4f}*\n"
+        f"ATR: *{atr_val:.4f}*\n\n"
+        f"TP1: {price + 2*atr_val:.4f}\n"
+        f"TP2: {price + 4*atr_val:.4f}\n"
+        f"TP3: {price + 6*atr_val:.4f}\n"
+        f"TP4: {price +10*atr_val:.4f}\n\n"
+        f"SL: {price - 2*atr_val:.4f}"
     )
 
     tg(msg)
-    print(f"[SIGNAL] {symbol} {side}")
+    print(f"[LONG] {symbol}")
 
 
 # ============================================================
-# SCANNER LOOP
+# SEND SHORT SIGNAL (AGGRESSIVE TAKE PROFITS)
+# ============================================================
+
+def send_short_signal(symbol, price, atr_val):
+
+    msg = (
+        f"🔴 *SHORT BREAKDOWN*\n"
+        f"Symbol: `{symbol}`\n\n"
+        f"Entry: *{price:.4f}*\n"
+        f"ATR: *{atr_val:.4f}*\n\n"
+        f"TP1: {price - 3*atr_val:.4f}\n"
+        f"TP2: {price - 5*atr_val:.4f}\n"
+        f"TP3: {price - 8*atr_val:.4f}\n"
+        f"TP4: {price -12*atr_val:.4f}\n\n"
+        f"SL: {price + 1.8*atr_val:.4f}"
+    )
+
+    tg(msg)
+    print(f"[SHORT] {symbol}")
+
+
+# ============================================================
+# MAIN SCANNER LOOP
 # ============================================================
 
 def scanner_loop():
     while True:
-        print("[SCAN] Starting scan…")
+        print("[SCAN] Starting cycle...")
 
         for symbol in ALL_PAIRS:
             try:
                 check_symbol(symbol)
             except Exception as e:
-                print(f"[SCAN ERROR] {symbol}: {e}")
+                print(f"[ERROR] {symbol}: {e}")
 
-        print("[SCAN] Done.\n")
+        print("[SCAN] Cycle complete.\n")
         time.sleep(SCAN_INTERVAL)
 
 
 # ============================================================
-# FLASK FOR RENDER
+# FLASK ENDPOINT FOR RENDER
 # ============================================================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Breakout Bot Running (REST + All Exchanges)"
+    return "Breakout Bot Running (REST, Multi-Exchange, Improved Short Logic)"
 
 
-# Start scanner
 threading.Thread(target=scanner_loop, daemon=True).start()
 
 
