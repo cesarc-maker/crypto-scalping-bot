@@ -1,317 +1,289 @@
-import ccxt
+import os
 import time
+import ccxt
 import pandas as pd
-import numpy as np
-import requests
-from flask import Flask
+from flask import Flask, request
 import threading
+import requests
 
-# ============================================================
+
+# ======================================================
 # CONFIG
-# ============================================================
+# ======================================================
 
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-SCAN_INTERVAL = 30   # Every 30 seconds
-TIMEFRAME = "1m"
-LIMIT = 50            # Number of candles to fetch
+SCAN_INTERVAL = 60
+PAIR_LIMIT = 50
+
+EXCHANGES = [
+    "binance",
+    "binance_futures",
+    "kucoin",
+    "bybit",
+    "okx"
+]
 
 
-# ============================================================
-# TELEGRAM SENDER
-# ============================================================
+# ======================================================
+# TELEGRAM MSG
+# ======================================================
 
-def tg(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+def send_telegram_message(text, chat_id=None):
+    if chat_id is None:
+        chat_id = CHAT_ID
     try:
-        requests.post(
-            url, 
-            data={
-                "chat_id": TELEGRAM_CHAT_ID, 
-                "text": msg, 
-                "parse_mode": "Markdown"
-            }
+        requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            f"?chat_id={chat_id}&text={text}"
         )
     except:
         pass
 
 
-# ============================================================
-# STARTUP MESSAGE
-# ============================================================
-
-def send_startup_message():
-    msg = (
-        "✅ *Breakout Bot Started Successfully!*\n\n"
-        "🟢 Exchanges Loaded: OKX, KuCoin, Bitget, MEXC\n"
-        f"🟡 Scan Interval: {SCAN_INTERVAL} seconds\n"
-        "🔵 Timeframe: 1-minute early signals\n"
-        "🟥 Short Mode: Aggressive TP (3×, 5×, 8×, 12× ATR)\n"
-        "🟩 Long Mode: Standard TP (2×, 4×, 6×, 10× ATR)\n"
-        "🚀 Now scanning for breakout opportunities..."
-    )
-    tg(msg)
-
-
-# ============================================================
-# EXCHANGES THAT WORK ON RENDER
-# ============================================================
-
-okx = ccxt.okx()
-kucoin = ccxt.kucoin()
-bitget = ccxt.bitget()
-mexc = ccxt.mexc()
-
-EXCHANGES = [okx, kucoin, bitget, mexc]
-
-
-# ============================================================
-# LOAD ALL USDT SYMBOLS
-# ============================================================
-
-def load_all_symbols():
-    symbols = set()
-
-    for ex in EXCHANGES:
-        try:
-            markets = ex.load_markets()
-            for sym in markets:
-                if "USDT" in sym:
-                    clean = sym.replace("/", "").replace(":USDT", "")
-                    symbols.add(clean)
-        except Exception as e:
-            print(f"[MARKET ERROR] {type(ex).__name__}: {e}")
-
-    return symbols
-
-
-ALL_PAIRS = load_all_symbols()
-print(f"[INIT] Loaded {len(ALL_PAIRS)} tradable symbols.")
-
-# Send Telegram startup message
-send_startup_message()
-
-
-# ============================================================
+# ======================================================
 # INDICATORS
-# ============================================================
+# ======================================================
 
-def ema(values, length):
-    return pd.Series(values).ewm(span=length, adjust=False).mean().values
-
-def true_range(h, l, c):
-    tr = []
-    for i in range(1, len(c)):
-        tr.append(max(h[i] - l[i], abs(h[i] - c[i-1]), abs(l[i] - c[i-1])))
-    return np.array(tr)
-
-def atr(h, l, c, period=14):
-    tr = true_range(h, l, c)
-    return pd.Series(tr).rolling(period).mean().values
+def fetch_ohlcv_df(exchange, symbol, timeframe="5m"):
+    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=150)
+    df = pd.DataFrame(data, columns=[
+        "timestamp","open","high","low","close","volume"
+    ])
+    return add_indicators(df)
 
 
-# ============================================================
-# ANTI-DUPLICATE SYSTEM
-# ============================================================
+def compute_rsi(series, length=14):
+    delta = series.diff()
+    gain  = delta.clip(lower=0)
+    loss  = -delta.clip(upper=0)
+    avg_gain = gain.rolling(length).mean()
+    avg_loss = loss.rolling(length).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    return 100 - (100 / (1 + rs))
 
-last_breakout_level = {}
-signal_times = {}
 
-MAX_DUPES = 2
-WINDOW = 7200  # 2 hours
+def compute_atr(df):
+    df["H-L"]  = df["high"] - df["low"]
+    df["H-PC"] = abs(df["high"] - df["close"].shift(1))
+    df["L-PC"] = abs(df["low"] - df["close"].shift(1))
+    tr = df[["H-L","H-PC","L-PC"]].max(axis=1)
+    return tr.rolling(14).mean()
 
 
-def allow_signal(symbol, breakout_level):
-    now = time.time()
+def add_indicators(df):
+    df["ema20"] = df["close"].ewm(span=20).mean()
+    df["ema50"] = df["close"].ewm(span=50).mean()
+    df["rsi"]   = compute_rsi(df["close"])
+    df["atr"]   = compute_atr(df)
+    df["vol_sma"] = df["volume"].rolling(20).mean()
+    return df
 
-    if symbol not in last_breakout_level:
-        last_breakout_level[symbol] = None
-    if symbol not in signal_times:
-        signal_times[symbol] = []
 
-    # Reject identical breakout level
-    if last_breakout_level[symbol] == breakout_level:
+# ======================================================
+# HIGH-RETURN BREAKOUT LOGIC
+# ======================================================
+
+def check_breakout_long(df):
+    last = df.iloc[-1]
+    prev1 = df.iloc[-2]
+    prev2 = df.iloc[-3]
+
+    # 1. ATR EXPLOSION (20%+)
+    if not (last["atr"] >= prev1["atr"] * 1.20):
         return False
 
-    # Remove timestamps older than 2 hours
-    signal_times[symbol] = [ts for ts in signal_times[symbol] if now - ts < WINDOW]
-
-    # Enforce max 2 signals per 2 hours
-    if len(signal_times[symbol]) >= MAX_DUPES:
+    # 2. VOLUME EXPANSION (150%+)
+    if not (last["volume"] > last["vol_sma"] * 1.5):
         return False
 
-    # Accept new breakout & record
-    last_breakout_level[symbol] = breakout_level
-    signal_times[symbol].append(now)
+    # 3. STRUCTURE BREAKOUT (break last 3 highs)
+    breakout_level = max(prev1["high"], prev2["high"], df.iloc[-4]["high"])
+    if not (last["close"] > breakout_level):
+        return False
+
+    # 4. POWER CANDLE (65%+ body)
+    body = last["close"] - last["open"]
+    range_ = last["high"] - last["low"]
+    if not (body > 0 and body >= 0.65 * range_):
+        return False
+
     return True
 
 
-# ============================================================
-# FETCH OHLCV FROM ANY WORKING EXCHANGE
-# ============================================================
+def check_breakout_short(df):
+    last = df.iloc[-1]
+    prev1 = df.iloc[-2]
+    prev2 = df.iloc[-3]
 
-def fetch_candles(symbol):
-    for ex in EXCHANGES:
-        try:
-            return ex.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
-        except:
-            continue
-    return None
+    # 1. ATR EXPLOSION (20%+)
+    if not (last["atr"] >= prev1["atr"] * 1.20):
+        return False
 
+    # 2. VOLUME EXPANSION (150%+)
+    if not (last["volume"] > last["vol_sma"] * 1.5):
+        return False
 
-# ============================================================
-# BREAKOUT LOGIC (LONG + ADVANCED SHORT)
-# ============================================================
+    # 3. STRUCTURE BREAKDOWN (break last 3 lows)
+    breakdown_level = min(prev1["low"], prev2["low"], df.iloc[-4]["low"])
+    if not (last["close"] < breakdown_level):
+        return False
 
-def check_symbol(symbol):
-    ohlcv = fetch_candles(symbol)
-    if ohlcv is None:
-        return
+    # 4. POWER CANDLE (65%+ body)
+    body = last["open"] - last["close"]
+    range_ = last["high"] - last["low"]
+    if not (body > 0 and body >= 0.65 * range_):
+        return False
 
-    df = pd.DataFrame(ohlcv, columns=["time","open","high","low","close","volume"])
-    if len(df) < 30:
-        return
-
-    close = df["close"].values
-    high = df["high"].values
-    low = df["low"].values
-    vol = df["volume"].values
-    op = df["open"].values
-
-    # Trend Filter
-    ema20 = ema(close, 20)
-    ema50 = ema(close, 50)
-
-    trend_long = ema20[-1] > ema50[-1]
-    trend_short = ema20[-1] < ema50[-1]
-
-    # ATR Explosion
-    atr_vals = atr(high, low, close, 14)
-    atr_now = atr_vals[-1]
-    atr_prev = atr_vals[-2]
-    atr_exp = atr_now >= atr_prev * 1.20
-
-    # Volume Expansion
-    vol_sma20 = pd.Series(vol).rolling(20).mean().values
-    vol_exp_long = vol[-1] > vol_sma20[-1] * 1.5
-    vol_exp_short = vol[-1] > vol_sma20[-1] * 1.3  # Lighter for shorts
-
-    # Power Candle
-    body = close - op
-    rng = high - low
-
-    power_long = (abs(body) / rng) > 0.65
-    power_short = (abs(body) / rng) > 0.70  # More strict
-
-    # SHORT wick dominance
-    upper_wick = high[-1] - max(op[-1], close[-1])
-    lower_wick = min(op[-1], close[-1]) - low[-1]
-    bearish_wick = upper_wick >= (lower_wick * 2)
-
-    # Microstructure Levels
-    last3high = max(high[-4:-1])
-    last3low = min(low[-4:-1])
-    price = close[-1]
-
-    # ======================
-    # 🟢 LONG BREAKOUT
-    # ======================
-    if (
-        price > last3high and
-        atr_exp and
-        vol_exp_long and
-        power_long and
-        trend_long
-    ):
-        if allow_signal(symbol, last3high):
-            send_long_signal(symbol, price, atr_now)
-
-    # ======================
-    # 🔴 SHORT BREAKDOWN (ADVANCED)
-    # ======================
-    if (
-        price < last3low and
-        atr_exp and
-        vol_exp_short and
-        power_short and
-        trend_short and
-        bearish_wick
-    ):
-        if allow_signal(symbol, last3low):
-            send_short_signal(symbol, price, atr_now)
+    return True
 
 
-# ============================================================
-# LONG SIGNAL
-# ============================================================
+# ======================================================
+# SIGNAL SENDER
+# ======================================================
 
-def send_long_signal(symbol, price, atr_val):
+def send_signal(symbol, direction, price, atr):
+
+    if direction == "LONG":
+        sl  = price - (2 * atr)
+        tp1 = price + (2 * atr)
+        tp2 = price + (4 * atr)
+        tp3 = price + (6 * atr)
+        tp4 = price + (10 * atr)
+    else:
+        sl  = price + (2 * atr)
+        tp1 = price - (2 * atr)
+        tp2 = price - (4 * atr)
+        tp3 = price - (6 * atr)
+        tp4 = price - (10 * atr)
+
     msg = (
-        f"🟢 *LONG BREAKOUT*\n"
-        f"Symbol: `{symbol}`\n\n"
-        f"Entry: *{price:.4f}*\n"
-        f"ATR: {atr_val:.4f}\n\n"
-        f"TP1: {price + 2*atr_val:.4f}\n"
-        f"TP2: {price + 4*atr_val:.4f}\n"
-        f"TP3: {price + 6*atr_val:.4f}\n"
-        f"TP4: {price +10*atr_val:.4f}\n\n"
-        f"SL: {price - 2*atr_val:.4f}"
+        f"🔥 HIGH-RETURN {direction} BREAKOUT SIGNAL\n\n"
+        f"Pair: {symbol}\n"
+        f"Entry: {price}\n"
+        f"ATR: {round(atr,4)}\n\n"
+        f"SL:  {round(sl,4)}\n"
+        f"TP1: {round(tp1,4)}\n"
+        f"TP2: {round(tp2,4)}\n"
+        f"TP3: {round(tp3,4)}\n"
+        f"TP4: {round(tp4,4)} (High-return target)\n"
+        f"⚠ Informational only."
     )
-    tg(msg)
-    print(f"[LONG] {symbol}")
+
+    send_telegram_message(msg)
+    print("SIGNAL →", symbol, direction)
 
 
-# ============================================================
-# SHORT SIGNAL (AGGRESSIVE)
-# ============================================================
+# ======================================================
+# EXCHANGE HELPERS
+# ======================================================
 
-def send_short_signal(symbol, price, atr_val):
-    msg = (
-        f"🔴 *SHORT BREAKDOWN*\n"
-        f"Symbol: `{symbol}`\n\n"
-        f"Entry: *{price:.4f}*\n"
-        f"ATR: {atr_val:.4f}\n\n"
-        f"TP1: {price - 3*atr_val:.4f}\n"
-        f"TP2: {price - 5*atr_val:.4f}\n"
-        f"TP3: {price - 8*atr_val:.4f}\n"
-        f"TP4: {price -12*atr_val:.4f}\n\n"
-        f"SL: {price + 1.8*atr_val:.4f}"
-    )
-    tg(msg)
-    print(f"[SHORT] {symbol}")
+def get_exchange(name):
+    try:
+        if name == "binance_futures":
+            return ccxt.binance({"options":{"defaultType":"future"}})
+        if name == "bybit":
+            return ccxt.bybit({"options":{"defaultType":"linear"}})
+        return getattr(ccxt, name)()
+    except:
+        return None
 
 
-# ============================================================
-# MAIN SCANNER
-# ============================================================
+def fetch_usdt_pairs(exchange):
+    try:
+        markets = exchange.load_markets()
+        return [s for s in markets if s.endswith("USDT")][:PAIR_LIMIT]
+    except:
+        return []
+
+
+# ======================================================
+# MAIN SCANNING LOOP
+# ======================================================
 
 def scanner_loop():
+    send_telegram_message("🚀 HIGH-RETURN BREAKOUT BOT ACTIVE")
+
     while True:
-        print("[SCAN] Starting cycle...")
+        try:
+            for ex_name in EXCHANGES:
 
-        for symbol in ALL_PAIRS:
-            try:
-                check_symbol(symbol)
-            except Exception as e:
-                print(f"[ERROR] {symbol}: {e}")
+                ex = get_exchange(ex_name)
+                if ex is None:
+                    continue
 
-        print("[SCAN] Cycle complete.\n")
-        time.sleep(SCAN_INTERVAL)
+                for symbol in fetch_usdt_pairs(ex):
+
+                    try:
+                        df = fetch_ohlcv_df(ex, symbol, "5m")
+                        last = df.iloc[-1]
+
+                        # Long breakout
+                        if check_breakout_long(df):
+                            send_signal(symbol, "LONG", last["close"], last["atr"])
+
+                        # Short breakout
+                        if check_breakout_short(df):
+                            send_signal(symbol, "SHORT", last["close"], last["atr"])
+
+                    except Exception as err:
+                        print("Error on", symbol, ":", err)
+
+            time.sleep(SCAN_INTERVAL)
+
+        except Exception as err:
+            print("Scanner crashed:", err)
+            time.sleep(10)
 
 
-# ============================================================
-# FLASK FOR RENDER
-# ============================================================
+# ======================================================
+# TELEGRAM WEBHOOK
+# ======================================================
 
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return "Breakout Bot Running (REST + Multi-Exchange + Enhanced Logic)"
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.get_json()
+    if not data:
+        return "OK"
 
+    msg  = data.get("message", {})
+    chat_id = msg.get("chat", {}).get("id")
+    text = msg.get("text","")
+
+    if text == "/start":
+        send_telegram_message("Bot Online — High-Return Breakout Mode Enabled.", chat_id)
+
+    elif text == "/status":
+        send_telegram_message("📡 Bot Running.", chat_id)
+
+    elif text == "/help":
+        send_telegram_message(
+            "/start — Activate Bot\n"
+            "/status — Bot Status\n"
+            "/help — Commands",
+            chat_id
+        )
+
+    return "OK"
+
+
+# ======================================================
+# START THREAD
+# ======================================================
 
 threading.Thread(target=scanner_loop, daemon=True).start()
+
+
+# ======================================================
+# RENDER SERVER
+# ======================================================
+
+@app.route("/")
+def home():
+    return "HIGH-RETURN BREAKOUT BOT RUNNING"
 
 
 if __name__ == "__main__":
