@@ -6,7 +6,6 @@ from flask import Flask, request
 import threading
 import requests
 
-
 # ======================================================
 # CONFIG
 # ======================================================
@@ -25,21 +24,71 @@ EXCHANGES = [
     "okx"
 ]
 
-
 # ======================================================
-# TELEGRAM MSG
+# TELEGRAM SENDER
 # ======================================================
 
 def send_telegram_message(text, chat_id=None):
     if chat_id is None:
         chat_id = CHAT_ID
+
     try:
         requests.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
             f"?chat_id={chat_id}&text={text}"
         )
-    except:
-        pass
+    except Exception as e:
+        print("Telegram error:", e)
+
+
+# ======================================================
+# STARTUP MESSAGE
+# ======================================================
+
+def send_startup_message():
+    send_telegram_message(
+        "✅ HIGH-RETURN BREAKOUT BOT ACTIVE\n"
+        "Exchanges: Binance, Binance Futures, KuCoin, Bybit, OKX\n"
+        "Timeframe: 5m\n"
+        "Duplicate Protection: ENABLED (max 2 per 2h, unique breakout levels only)"
+    )
+
+
+# ======================================================
+# ANTI-DUPLICATE SYSTEM
+# ======================================================
+
+last_signal_level = {}     # Stores the last breakout level per symbol
+signal_times = {}          # Stores timestamps of last two signals
+MAX_DUPES = 2
+WINDOW = 7200  # 2 hours in seconds
+
+def allow_signal(symbol, breakout_level):
+    now = time.time()
+
+    if symbol not in last_signal_level:
+        last_signal_level[symbol] = None
+    if symbol not in signal_times:
+        signal_times[symbol] = []
+
+    # 1. Prevent duplicate at same breakout level
+    if last_signal_level[symbol] == breakout_level:
+        return False
+
+    # 2. Remove timestamps older than 2 hours
+    signal_times[symbol] = [
+        ts for ts in signal_times[symbol]
+        if now - ts < WINDOW
+    ]
+
+    # 3. Allow max 2 messages in 2 hours
+    if len(signal_times[symbol]) >= MAX_DUPES:
+        return False
+
+    # 4. Accept the signal
+    last_signal_level[symbol] = breakout_level
+    signal_times[symbol].append(now)
+    return True
 
 
 # ======================================================
@@ -82,31 +131,31 @@ def add_indicators(df):
 
 
 # ======================================================
-# HIGH-RETURN BREAKOUT LOGIC
+# BREAKOUT LOGIC
 # ======================================================
 
 def check_breakout_long(df):
     last = df.iloc[-1]
-    prev1 = df.iloc[-2]
-    prev2 = df.iloc[-3]
+    p1 = df.iloc[-2]
+    p2 = df.iloc[-3]
 
-    # 1. ATR EXPLOSION (20%+)
-    if not (last["atr"] >= prev1["atr"] * 1.20):
+    # ATR Explosion
+    if not (last["atr"] >= p1["atr"] * 1.20):
         return False
 
-    # 2. VOLUME EXPANSION (150%+)
+    # Volume Expansion
     if not (last["volume"] > last["vol_sma"] * 1.5):
         return False
 
-    # 3. STRUCTURE BREAKOUT (break last 3 highs)
-    breakout_level = max(prev1["high"], prev2["high"], df.iloc[-4]["high"])
-    if not (last["close"] > breakout_level):
+    # Break above last 3 highs
+    breakout_lvl = max(p1["high"], p2["high"], df.iloc[-4]["high"])
+    if not (last["close"] > breakout_lvl):
         return False
 
-    # 4. POWER CANDLE (65%+ body)
+    # Power Candle
     body = last["close"] - last["open"]
-    range_ = last["high"] - last["low"]
-    if not (body > 0 and body >= 0.65 * range_):
+    rng = last["high"] - last["low"]
+    if not (body > 0 and body >= 0.65 * rng):
         return False
 
     return True
@@ -114,26 +163,26 @@ def check_breakout_long(df):
 
 def check_breakout_short(df):
     last = df.iloc[-1]
-    prev1 = df.iloc[-2]
-    prev2 = df.iloc[-3]
+    p1 = df.iloc[-2]
+    p2 = df.iloc[-3]
 
-    # 1. ATR EXPLOSION (20%+)
-    if not (last["atr"] >= prev1["atr"] * 1.20):
+    # ATR Explosion
+    if not (last["atr"] >= p1["atr"] * 1.20):
         return False
 
-    # 2. VOLUME EXPANSION (150%+)
+    # Volume Expansion
     if not (last["volume"] > last["vol_sma"] * 1.5):
         return False
 
-    # 3. STRUCTURE BREAKDOWN (break last 3 lows)
-    breakdown_level = min(prev1["low"], prev2["low"], df.iloc[-4]["low"])
-    if not (last["close"] < breakdown_level):
+    # Break below last 3 lows
+    breakdown_lvl = min(p1["low"], p2["low"], df.iloc[-4]["low"])
+    if not (last["close"] < breakdown_lvl):
         return False
 
-    # 4. POWER CANDLE (65%+ body)
+    # Power Candle
     body = last["open"] - last["close"]
-    range_ = last["high"] - last["low"]
-    if not (body > 0 and body >= 0.65 * range_):
+    rng = last["high"] - last["low"]
+    if not (body > 0 and body >= 0.65 * rng):
         return False
 
     return True
@@ -159,7 +208,7 @@ def send_signal(symbol, direction, price, atr):
         tp4 = price - (10 * atr)
 
     msg = (
-        f"🔥 HIGH-RETURN {direction} BREAKOUT SIGNAL\n\n"
+        f"🔥 HIGH-RETURN {direction} BREAKOUT\n\n"
         f"Pair: {symbol}\n"
         f"Entry: {price}\n"
         f"ATR: {round(atr,4)}\n\n"
@@ -167,7 +216,7 @@ def send_signal(symbol, direction, price, atr):
         f"TP1: {round(tp1,4)}\n"
         f"TP2: {round(tp2,4)}\n"
         f"TP3: {round(tp3,4)}\n"
-        f"TP4: {round(tp4,4)} (High-return target)\n"
+        f"TP4: {round(tp4,4)}\n"
         f"⚠ Informational only."
     )
 
@@ -199,11 +248,12 @@ def fetch_usdt_pairs(exchange):
 
 
 # ======================================================
-# MAIN SCANNING LOOP
+# MAIN SCANNER LOOP
 # ======================================================
 
 def scanner_loop():
-    send_telegram_message("🚀 HIGH-RETURN BREAKOUT BOT ACTIVE")
+
+    send_startup_message()
 
     while True:
         try:
@@ -219,16 +269,20 @@ def scanner_loop():
                         df = fetch_ohlcv_df(ex, symbol, "5m")
                         last = df.iloc[-1]
 
-                        # Long breakout
+                        # LONG BREAKOUT
                         if check_breakout_long(df):
-                            send_signal(symbol, "LONG", last["close"], last["atr"])
+                            breakout_lvl = max(df.iloc[-2]["high"], df.iloc[-3]["high"], df.iloc[-4]["high"])
+                            if allow_signal(symbol, breakout_lvl):
+                                send_signal(symbol, "LONG", last["close"], last["atr"])
 
-                        # Short breakout
+                        # SHORT BREAKOUT
                         if check_breakout_short(df):
-                            send_signal(symbol, "SHORT", last["close"], last["atr"])
+                            breakdown_lvl = min(df.iloc[-2]["low"], df.iloc[-3]["low"], df.iloc[-4]["low"])
+                            if allow_signal(symbol, breakdown_lvl):
+                                send_signal(symbol, "SHORT", last["close"], last["atr"])
 
                     except Exception as err:
-                        print("Error on", symbol, ":", err)
+                        print("Error:", symbol, err)
 
             time.sleep(SCAN_INTERVAL)
 
@@ -249,15 +303,15 @@ def webhook():
     if not data:
         return "OK"
 
-    msg  = data.get("message", {})
+    msg = data.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
     text = msg.get("text","")
 
     if text == "/start":
-        send_telegram_message("Bot Online — High-Return Breakout Mode Enabled.", chat_id)
+        send_telegram_message("Bot is online and scanning markets.", chat_id)
 
     elif text == "/status":
-        send_telegram_message("📡 Bot Running.", chat_id)
+        send_telegram_message("📡 Bot Running Smoothly.", chat_id)
 
     elif text == "/help":
         send_telegram_message(
