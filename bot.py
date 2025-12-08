@@ -2,7 +2,8 @@ import os
 import time
 import ccxt
 import pandas as pd
-from flask import Flask, request
+import numpy as np
+from flask import Flask
 import threading
 import requests
 
@@ -28,14 +29,11 @@ EXCHANGES = [
 # TELEGRAM SENDER
 # ======================================================
 
-def send_telegram_message(text, chat_id=None):
-    if chat_id is None:
-        chat_id = CHAT_ID
-
+def send_telegram_message(text):
     try:
         requests.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-            f"?chat_id={chat_id}&text={text}"
+            f"?chat_id={CHAT_ID}&text={text}"
         )
     except Exception as e:
         print("Telegram error:", e)
@@ -46,15 +44,20 @@ def send_telegram_message(text, chat_id=None):
 
 def send_startup_message():
     send_telegram_message(
-        "✅ HIGH-RETURN BREAKOUT BOT ACTIVE\n"
-        "Filters: ATR, Volume, Structure, Power Candle\n"
-        "Trend: EMA20/EMA50 confirmation added\n"
-        "Strict Mode: ON (Higher Win-Rate)\n"
-        "Duplicate Protection: ENABLED"
+        "🚀 ULTRA-STRICT BREAKOUT BOT ACTIVE\n\n"
+        "MTF Trend: 5m + 15m + 1h\n"
+        "Volume > 2.2x SMA20\n"
+        "ATR Explosion > 35%\n"
+        "Power Candle ≥ 75%\n"
+        "Displacement Breakouts Enabled\n"
+        "Whale Pressure Filter Enabled\n"
+        "Regime Filter Enabled\n"
+        "Duplicate Protection: ON\n\n"
+        "Only elite-quality signals will fire."
     )
 
 # ======================================================
-# ANTI-DUPLICATE SYSTEM
+# DUPLICATE PROTECTION
 # ======================================================
 
 last_signal_level = {}
@@ -70,18 +73,14 @@ def allow_signal(symbol, breakout_level):
     if symbol not in signal_times:
         signal_times[symbol] = []
 
-    # Prevent same breakout twice
     if last_signal_level[symbol] == breakout_level:
         return False
 
-    # Remove timestamps older than 2 hours
     signal_times[symbol] = [ts for ts in signal_times[symbol] if now - ts < WINDOW]
 
-    # Max 2 signals per 2h
     if len(signal_times[symbol]) >= MAX_DUPES:
         return False
 
-    # Accept new breakout
     last_signal_level[symbol] = breakout_level
     signal_times[symbol].append(now)
     return True
@@ -90,13 +89,6 @@ def allow_signal(symbol, breakout_level):
 # INDICATORS
 # ======================================================
 
-def fetch_ohlcv_df(exchange, symbol, timeframe="5m"):
-    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=150)
-    df = pd.DataFrame(data, columns=[
-        "timestamp","open","high","low","close","volume"
-    ])
-    return add_indicators(df)
-
 def compute_rsi(series, length=14):
     delta = series.diff()
     gain  = delta.clip(lower=0)
@@ -104,10 +96,10 @@ def compute_rsi(series, length=14):
     avg_gain = gain.rolling(length).mean()
     avg_loss = loss.rolling(length).mean()
     rs = avg_gain / (avg_loss + 1e-10)
-    return 100 - (100 / (1 + rs))
+    return 100 - (100/(1 + rs))
 
 def compute_atr(df):
-    df["H-L"]  = df["high"] - df["low"]
+    df["H-L"] = df["high"] - df["low"]
     df["H-PC"] = abs(df["high"] - df["close"].shift(1))
     df["L-PC"] = abs(df["low"] - df["close"].shift(1))
     tr = df[["H-L","H-PC","L-PC"]].max(axis=1)
@@ -116,106 +108,138 @@ def compute_atr(df):
 def add_indicators(df):
     df["ema20"] = df["close"].ewm(span=20).mean()
     df["ema50"] = df["close"].ewm(span=50).mean()
-    df["rsi"]   = compute_rsi(df["close"])
-    df["atr"]   = compute_atr(df)
+    df["rsi"] = compute_rsi(df["close"])
+    df["atr"] = compute_atr(df)
     df["vol_sma"] = df["volume"].rolling(20).mean()
+    df["range"] = df["high"] - df["low"]
+    df["std20"] = df["close"].rolling(20).std()
+    df["std50"] = df["close"].rolling(50).std()
     return df
 
 # ======================================================
-# STRICTER BREAKOUT LOGIC (HIGHER WIN-RATE)
+# MTF FETCHER
 # ======================================================
 
-def check_breakout_long(df):
-    last = df.iloc[-1]
-    p1 = df.iloc[-2]
-    p2 = df.iloc[-3]
+def fetch_tf(exchange, symbol, timeframe):
+    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=150)
+    df = pd.DataFrame(data, columns=["ts","open","high","low","close","volume"])
+    return add_indicators(df)
 
-    # EMA alignment (new stricter filter)
-    if not (last["ema20"] > last["ema50"]):
-        return False
+# ======================================================
+# ULTRA STRICT LONG LOGIC
+# ======================================================
 
-    # ATR Explosion (25% instead of 20%)
-    if not (last["atr"] >= p1["atr"] * 1.25):
-        return False
+def check_breakout_long(df5, df15, df1h):
+    last = df5.iloc[-1]
+    p1 = df5.iloc[-2]
+    p2 = df5.iloc[-3]
 
-    # Volume Expansion (1.8x instead of 1.5x)
-    if not (last["volume"] > last["vol_sma"] * 1.8):
-        return False
+    # 1. MTF Trend Alignment
+    if not (df5["ema20"].iloc[-1] > df5["ema50"].iloc[-1]): return False
+    if not (df15["ema20"].iloc[-1] > df15["ema50"].iloc[-1]): return False
+    if not (df1h["ema20"].iloc[-1] > df1h["ema50"].iloc[-1]): return False
 
-    # Break above last 3 highs
-    breakout_lvl = max(p1["high"], p2["high"], df.iloc[-4]["high"])
-    if not (last["close"] > breakout_lvl):
-        return False
+    # 2. ATR Explosion (Ultra Strict)
+    if not (last["atr"] >= p1["atr"] * 1.35): return False
 
-    # Power candle (70% instead of 65%)
+    # 3. Volume Expansion (Ultra Strict)
+    if not (last["volume"] > last["vol_sma"] * 2.2): return False
+
+    breakout_lvl = max(p1["high"], p2["high"], df5.iloc[-4]["high"])
+
+    # 4. Displacement Breakout
+    if not (last["close"] > breakout_lvl * 1.0035): return False
+
+    # 5. Power Candle (≥ 75%)
     body = last["close"] - last["open"]
-    rng = last["high"] - last["low"]
-    if not (body > 0 and body >= 0.70 * rng):
-        return False
+    if not (body > 0): return False
+    if not (body >= 0.75 * last["range"]): return False
 
-    # Reject weak candles (inside candle filter)
-    prev_range = p1["high"] - p1["low"]
-    if rng < prev_range * 0.80:
-        return False
+    # 6. Whale Pressure (BUY imbalance)
+    bull_wick = last["close"] - last["open"]
+    bear_wick = last["high"] - last["close"]
+    if not (bull_wick > bear_wick): return False
 
-    return True
+    # 7. Regime Filter
+    if not (last["std20"] > last["std50"] * 0.85): return False
 
-def check_breakout_short(df):
-    last = df.iloc[-1]
-    p1 = df.iloc[-2]
-    p2 = df.iloc[-3]
+    # 8. RSI Regime Confirmation
+    if not (last["rsi"] > 60): return False
 
-    # EMA alignment
-    if not (last["ema20"] < last["ema50"]):
-        return False
-
-    # ATR Explosion stricter
-    if not (last["atr"] >= p1["atr"] * 1.25):
-        return False
-
-    # Volume Expansion stricter
-    if not (last["volume"] > last["vol_sma"] * 1.8):
-        return False
-
-    # Break below last 3 lows
-    breakdown_lvl = min(p1["low"], p2["low"], df.iloc[-4]["low"])
-    if not (last["close"] < breakdown_lvl):
-        return False
-
-    # Power candle stricter
-    body = last["open"] - last["close"]
-    rng = last["high"] - last["low"]
-    if not (body > 0 and body >= 0.70 * rng):
-        return False
-
-    # Reject inside-candle weak breakdown
-    prev_range = p1["high"] - p1["low"]
-    if rng < prev_range * 0.80:
-        return False
+    # 9. Candle must NOT be inside candle
+    prev_range = p1["range"]
+    if last["range"] < prev_range * 1.15: return False
 
     return True
 
 # ======================================================
-# SEND SIGNAL
+# ULTRA STRICT SHORT LOGIC
+# ======================================================
+
+def check_breakout_short(df5, df15, df1h):
+    last = df5.iloc[-1]
+    p1 = df5.iloc[-2]
+    p2 = df5.iloc[-3]
+
+    # 1. MTF Trend
+    if not (df5["ema20"].iloc[-1] < df5["ema50"].iloc[-1]): return False
+    if not (df15["ema20"].iloc[-1] < df15["ema50"].iloc[-1]): return False
+    if not (df1h["ema20"].iloc[-1] < df1h["ema50"].iloc[-1]): return False
+
+    # 2. ATR
+    if not (last["atr"] >= p1["atr"] * 1.35): return False
+
+    # 3. Volume
+    if not (last["volume"] > last["vol_sma"] * 2.2): return False
+
+    breakdown_lvl = min(p1["low"], p2["low"], df5.iloc[-4]["low"])
+
+    # 4. Displacement
+    if not (last["close"] < breakdown_lvl * 0.9965): return False
+
+    # 5. Power Candle
+    body = last["open"] - last["close"]
+    if not (body > 0): return False
+    if not (body >= 0.75 * last["range"]): return False
+
+    # 6. Whale Pressure (SELL imbalance)
+    bear_pressure = last["open"] - last["close"]
+    bull_recover = last["close"] - last["low"]
+    if not (bear_pressure > bull_recover): return False
+
+    # 7. Regime Filter
+    if not (last["std20"] > last["std50"] * 0.85): return False
+
+    # 8. RSI
+    if not (last["rsi"] < 40): return False
+
+    # 9. Avoid inside candle
+    prev_range = p1["range"]
+    if last["range"] < prev_range * 1.15: return False
+
+    return True
+
+# ======================================================
+# SIGNAL SENDER
 # ======================================================
 
 def send_signal(symbol, direction, price, atr):
-
     if direction == "LONG":
-        sl  = price - (2 * atr)
-        tp1 = price + (2 * atr)
-        tp2 = price + (4 * atr)
-        tp3 = price + (6 * atr)
-        tp4 = price + (10 * atr)
+        sl  = price - 2*atr
+        tp1 = price + 2*atr
+        tp2 = price + 4*atr
+        tp3 = price + 6*atr
+        tp4 = price +10*atr
+
     else:
-        sl  = price + (2 * atr)
-        tp1 = price - (2 * atr)
-        tp2 = price - (4 * atr)
-        tp3 = price - (6 * atr)
-        tp4 = price - (10 * atr)
+        sl  = price + 2*atr
+        tp1 = price - 2*atr
+        tp2 = price - 4*atr
+        tp3 = price - 6*atr
+        tp4 = price -10*atr
 
     msg = (
-        f"🔥 STRICT {direction} BREAKOUT\n\n"
+        f"🔥 ULTRA-STRICT {direction} BREAKOUT\n\n"
         f"Pair: {symbol}\n"
         f"Entry: {price}\n"
         f"ATR: {round(atr,4)}\n\n"
@@ -223,12 +247,12 @@ def send_signal(symbol, direction, price, atr):
         f"TP1: {round(tp1,4)}\n"
         f"TP2: {round(tp2,4)}\n"
         f"TP3: {round(tp3,4)}\n"
-        f"TP4: {round(tp4,4)}\n"
-        f"⚠ Higher Win-Rate Mode"
+        f"TP4: {round(tp4,4)}\n\n"
+        "⚠ Elite-grade signal only."
     )
 
     send_telegram_message(msg)
-    print("SIGNAL →", symbol, direction)
+    print("SIGNAL:", symbol, direction)
 
 # ======================================================
 # EXCHANGE HELPERS
@@ -267,20 +291,23 @@ def scanner_loop():
                     continue
 
                 for symbol in fetch_usdt_pairs(ex):
-
                     try:
-                        df = fetch_ohlcv_df(ex, symbol, "5m")
-                        last = df.iloc[-1]
+                        df5 = fetch_tf(ex, symbol, "5m")
+                        df15 = fetch_tf(ex, symbol, "15m")
+                        df1h = fetch_tf(ex, symbol, "1h")
+
+                        last = df5.iloc[-1]
+
+                        breakout_lvl = max(df5.iloc[-2]["high"], df5.iloc[-3]["high"], df5.iloc[-4]["high"])
+                        breakdown_lvl = min(df5.iloc[-2]["low"], df5.iloc[-3]["low"], df5.iloc[-4]["low"])
 
                         # LONG
-                        if check_breakout_long(df):
-                            breakout_lvl = max(df.iloc[-2]["high"], df.iloc[-3]["high"], df.iloc[-4]["high"])
+                        if check_breakout_long(df5, df15, df1h):
                             if allow_signal(symbol, breakout_lvl):
                                 send_signal(symbol, "LONG", last["close"], last["atr"])
 
                         # SHORT
-                        if check_breakout_short(df):
-                            breakdown_lvl = min(df.iloc[-2]["low"], df.iloc[-3]["low"], df.iloc[-4]["low"])
+                        if check_breakout_short(df5, df15, df1h):
                             if allow_signal(symbol, breakdown_lvl):
                                 send_signal(symbol, "SHORT", last["close"], last["atr"])
 
@@ -294,50 +321,16 @@ def scanner_loop():
             time.sleep(10)
 
 # ======================================================
-# TELEGRAM WEBHOOK
+# RENDER SERVER
 # ======================================================
 
 app = Flask(__name__)
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json()
-    if not data:
-        return "OK"
-
-    msg = data.get("message", {})
-    chat_id = msg.get("chat", {}).get("id")
-    text = msg.get("text","")
-
-    if text == "/start":
-        send_telegram_message("Bot Online — Strict Mode Enabled.", chat_id)
-
-    elif text == "/status":
-        send_telegram_message("📡 Bot Running Smoothly.", chat_id)
-
-    elif text == "/help":
-        send_telegram_message(
-            "/start — Activate Bot\n"
-            "/status — Bot Status\n"
-            "/help — Commands",
-            chat_id
-        )
-
-    return "OK"
-
-# ======================================================
-# START THREAD
-# ======================================================
-
-threading.Thread(target=scanner_loop, daemon=True).start()
-
-# ======================================================
-# RENDER SERVER
-# ======================================================
-
 @app.route("/")
 def home():
-    return "HIGH-RETURN STRICT BREAKOUT BOT RUNNING"
+    return "ULTRA-STRICT BREAKOUT BOT RUNNING"
+
+threading.Thread(target=scanner_loop, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
