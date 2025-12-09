@@ -3,11 +3,10 @@ import time
 import ccxt
 import pandas as pd
 import numpy as np
-import threading
 from flask import Flask
+import threading
 import requests
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor
 
 # ======================================================
 # CONFIG
@@ -18,7 +17,6 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 SCAN_INTERVAL = 10
 PAIR_LIMIT = 50
-MAX_WORKERS = 10  # thread-pool size
 
 EXCHANGES = [
     "binance",
@@ -28,6 +26,7 @@ EXCHANGES = [
     "okx"
 ]
 
+# Tracks symbols that error repeatedly
 blacklist = set()
 
 # ======================================================
@@ -43,50 +42,43 @@ def send_telegram(text):
     except:
         pass
 
-def send_startup():
-    msg = (
-        "🚀 *ELITE SCALPING BOT ACTIVE*\n\n"
-        "• Multi-timeframe Sweep → BOS → FVG → Pullback\n"
-        "• Strict FVG + Strong Displacement\n"
-        "• Mid-level Pullback Entry\n"
-        "• Trend, Volume & Volatility Filters\n"
-        "• Dynamic Quality Rating\n"
-        "• TP: 1.5R / 2.5R / 4R\n"
-        "• Multi-exchange Scanner\n"
-        "• Scan Interval: 10 seconds\n"
-    )
-    send_telegram(msg)
+def send_startup_message():
+    send_telegram("🚀 ELITE SCALPER BOT RUNNING")
 
 # ======================================================
 # DUPLICATE PROTECTION
 # ======================================================
 
-recent_signals = {}
-DUPLICATE_WINDOW = 1800
+last_signals = {}
+DUPLICATE_WINDOW = 1800  # 30 minutes
 
 def allow_signal(symbol, direction):
     now = time.time()
+
     key = f"{symbol}_{direction}"
 
-    if key not in recent_signals:
-        recent_signals[key] = []
+    if key not in last_signals:
+        last_signals[key] = []
 
-    recent_signals[key] = [t for t in recent_signals[key] if now - t < DUPLICATE_WINDOW]
+    # keep only recent timestamps
+    last_signals[key] = [
+        t for t in last_signals[key] if now - t < DUPLICATE_WINDOW
+    ]
 
-    if len(recent_signals[key]) >= 1:
+    if len(last_signals[key]) >= 1:
         return False
 
-    recent_signals[key].append(now)
+    last_signals[key].append(now)
     return True
 
 # ======================================================
 # INDICATORS
 # ======================================================
 
-def ema(s, l):
-    return s.ewm(span=l, adjust=False).mean()
+def ema(series, length):
+    return series.ewm(span=length, adjust=False).mean()
 
-def rsi(series, length=14):
+def compute_rsi(series, length=14):
     delta = series.diff()
     up = delta.clip(lower=0)
     down = -delta.clip(upper=0)
@@ -100,14 +92,14 @@ def add_indicators(df):
     df["ema21"] = ema(df["close"], 21)
     df["ema50"] = ema(df["close"], 50)
     df["ema200"] = ema(df["close"], 200)
-    df["rsi"] = rsi(df["close"])
+    df["rsi"] = compute_rsi(df["close"])
     df["vol_sma"] = df["volume"].rolling(20).mean()
     df["atr"] = (df["high"] - df["low"]).rolling(14).mean()
     df["std"] = df["close"].rolling(20).std()
     return df
 
 # ======================================================
-# EXCHANGE LOADING
+# EXCHANGE HELPERS
 # ======================================================
 
 def get_exchange(name):
@@ -117,11 +109,10 @@ def get_exchange(name):
         if name == "bybit":
             return ccxt.bybit({"options": {"defaultType": "linear"}})
         return getattr(ccxt, name)()
-    except Exception as e:
-        print("Exchange load error:", e)
+    except Exception:
         return None
 
-def fetch_pairs(ex):
+def fetch_usdt_pairs(ex):
     try:
         mk = ex.load_markets()
         return [s for s in mk if s.endswith("USDT")][:PAIR_LIMIT]
@@ -130,8 +121,8 @@ def fetch_pairs(ex):
 
 def fetch_df(ex, symbol, tf):
     try:
-        raw = ex.fetch_ohlcv(symbol, timeframe=tf, limit=200)
-        df = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume"])
+        ohlcv = ex.fetch_ohlcv(symbol, timeframe=tf, limit=200)
+        df = pd.DataFrame(ohlcv, columns=["ts","open","high","low","close","volume"])
         return add_indicators(df)
     except:
         return None
@@ -140,7 +131,7 @@ def fetch_df(ex, symbol, tf):
 # ELITE LOGIC
 # ======================================================
 
-def sweep_detect(df, direction):
+def detect_sweep(df, direction):
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
@@ -150,16 +141,15 @@ def sweep_detect(df, direction):
         return last["high"] > prev["high"] and last["close"] < prev["high"]
     return False
 
-def strong_displacement(df, direction):
+def detect_displacement(df, direction):
     last = df.iloc[-1]
-
     full = last["high"] - last["low"]
+
     if full == 0:
         return False
 
     body = abs(last["close"] - last["open"])
     body_ratio = body / full
-
     vol_ok = last["volume"] > df["vol_sma"].iloc[-1] * 1.5
 
     if direction == "long":
@@ -172,8 +162,9 @@ def detect_fvg(df, direction):
     c1 = df.iloc[-3]
     c3 = df.iloc[-1]
 
+    # STRICT FVG
     if direction == "long":
-        if c1["low"] > c3["high"]:  
+        if c1["low"] > c3["high"]:
             return (c3["high"], c1["low"])
 
     if direction == "short":
@@ -182,9 +173,9 @@ def detect_fvg(df, direction):
 
     return None
 
-def in_mid_fvg(price, fvg):
+def price_in_mid_fvg(price, fvg):
     low, high = min(fvg), max(fvg)
-    mid = low + (high - low) * 0.5
+    mid = low + (high - low) * 0.50
     return low < price < mid
 
 def generate_signal(df1, df5, df15):
@@ -197,155 +188,39 @@ def generate_signal(df1, df5, df15):
 
     for direction in ["long", "short"]:
 
-        if not (sweep_detect(df1, direction) and sweep_detect(df5, direction)):
+        # Sweep must appear on 1m + 5m
+        if not detect_sweep(df1, direction): 
+            continue
+        if not detect_sweep(df5, direction): 
             continue
 
-        if not strong_displacement(df1, direction):
+        # Strong displacement
+        if not detect_displacement(df1, direction):
             continue
 
+        # Strict FVG
         fvg = detect_fvg(df1, direction)
         if not fvg:
             continue
 
         entry = df1["close"].iloc[-1]
-        if not in_mid_fvg(entry, fvg):
+
+        # Mid-level FVG pullback entry
+        if not price_in_mid_fvg(entry, fvg):
             continue
 
+        # Trend filter
         if direction == "long" and not trend_long:
             continue
         if direction == "short" and not trend_short:
             continue
 
+        # SL = sweep extreme
         sl = df1["low"].iloc[-2] if direction == "long" else df1["high"].iloc[-2]
         R = abs(entry - sl)
 
-        return (direction.upper(), entry, sl, R)
+        return direction.upper(), entry, sl, R
 
     return None
 
-# ======================================================
-# QUALITY RATING
-# ======================================================
-
-def quality_rating(df):
-    try:
-        last = df.iloc[-1]
-        score = 0
-
-        if last["volume"] > df["vol_sma"].iloc[-1] * 2:
-            score += 1
-        if last["atr"] > df["atr"].rolling(20).mean().iloc[-1]:
-            score += 1
-        if last["std"] > df["std"].rolling(20).mean().iloc[-1]:
-            score += 1
-
-        if score == 3:
-            return "EXTREME"
-        if score == 2:
-            return "VERY HIGH"
-        return "HIGH"
-    except:
-        return "HIGH"
-
-# ======================================================
-# SEND SIGNAL
-# ======================================================
-
-def send_signal(symbol, ex_name, direction, entry, sl, tp1, tp2, tp3, quality):
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    lev = "10x–25x" if ("BTC" in symbol or "ETH" in symbol) else "5x–15x"
-
-    msg = (
-        f"🔥 *ELITE SCALPING SIGNAL — {direction}*\n\n"
-        f"*Pair:* {symbol}\n"
-        f"*Exchange:* {ex_name.upper()}\n"
-        f"*Entry:* {entry}\n\n"
-        f"*Stop Loss:* {sl}\n"
-        f"*TP1 (1.5R):* {tp1}\n"
-        f"*TP2 (2.5R):* {tp2}\n"
-        f"*TP3 (4R):* {tp3}\n\n"
-        f"*Leverage:* {lev}\n"
-        f"*Quality:* {quality}\n"
-        f"*Time:* {ts}\n"
-    )
-
-    send_telegram(msg)
-
-# ======================================================
-# SYMBOL PROCESSING
-# ======================================================
-
-def process_symbol(ex, ex_name, symbol):
-    if symbol in blacklist:
-        return
-
-    try:
-        df1 = fetch_df(ex, symbol, "1m")
-        df5 = fetch_df(ex, symbol, "5m")
-        df15 = fetch_df(ex, symbol, "15m")
-
-        if df1 is None or df5 is None or df15 is None:
-            blacklist.add(symbol)
-            return
-
-        if len(df1) < 50 or len(df5) < 50 or len(df15) < 50:
-            blacklist.add(symbol)
-            return
-
-        result = generate_signal(df1, df5, df15)
-        if not result:
-            return
-
-        direction, entry, sl, R = result
-
-        if not allow_signal(symbol, direction):
-            return
-
-        tp1 = entry + 1.5*R if direction == "LONG" else entry - 1.5*R
-        tp2 = entry + 2.5*R if direction == "LONG" else entry - 2.5*R
-        tp3 = entry + 4*R   if direction == "LONG" else entry - 4*R
-
-        q = quality_rating(df1)
-
-        send_signal(symbol, ex_name, direction, entry, sl, tp1, tp2, tp3, q)
-
-    except Exception as e:
-        print(f"SERIOUS ERROR ({symbol}):", e)
-        blacklist.add(symbol)
-
-# ======================================================
-# MAIN SCANNER LOOP
-# ======================================================
-
-def scanner_loop():
-    send_startup()
-
-    while True:
-        for ex_name in EXCHANGES:
-
-            ex = get_exchange(ex_name)
-            if not ex:
-                continue
-
-            symbols = fetch_pairs(ex)
-
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                for symbol in symbols:
-                    executor.submit(process_symbol, ex, ex_name, symbol)
-
-        time.sleep(SCAN_INTERVAL)
-
-# ======================================================
-# FLASK KEEP-ALIVE
-# ======================================================
-
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "ELITE SCALPER BOT RUNNING"
-
-threading.Thread(target=scanner_loop, daemon=True).start()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+# =========================
