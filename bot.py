@@ -3,10 +3,11 @@ import time
 import ccxt
 import pandas as pd
 import numpy as np
-from flask import Flask
 import threading
+from flask import Flask
 import requests
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 
 # ======================================================
 # CONFIG
@@ -17,6 +18,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 SCAN_INTERVAL = 10
 PAIR_LIMIT = 50
+MAX_WORKERS = 10  # thread-pool size
 
 EXCHANGES = [
     "binance",
@@ -25,6 +27,8 @@ EXCHANGES = [
     "bybit",
     "okx"
 ]
+
+blacklist = set()
 
 # ======================================================
 # TELEGRAM
@@ -41,15 +45,14 @@ def send_telegram(text):
 
 def send_startup():
     msg = (
-        "🚀 *ELITE SCALPING BOT ONLINE*\n\n"
-        "• Multi-timeframe Liquidity Sweep\n"
-        "• Strong Displacement (60% body + vol spike)\n"
-        "• Strict FVG Detection\n"
+        "🚀 *ELITE SCALPING BOT ACTIVE*\n\n"
+        "• Multi-timeframe Sweep → BOS → FVG → Pullback\n"
+        "• Strict FVG + Strong Displacement\n"
         "• Mid-level Pullback Entry\n"
-        "• 15m Trend Filter\n"
+        "• Trend, Volume & Volatility Filters\n"
         "• Dynamic Quality Rating\n"
-        "• TP Targets: 1.5R / 2.5R / 4R\n"
-        "• Exchanges: Binance, Binance Futures, Kucoin, Bybit, OKX\n"
+        "• TP: 1.5R / 2.5R / 4R\n"
+        "• Multi-exchange Scanner\n"
         "• Scan Interval: 10 seconds\n"
     )
     send_telegram(msg)
@@ -80,8 +83,8 @@ def allow_signal(symbol, direction):
 # INDICATORS
 # ======================================================
 
-def ema(series, length):
-    return series.ewm(span=length, adjust=False).mean()
+def ema(s, l):
+    return s.ewm(span=l, adjust=False).mean()
 
 def rsi(series, length=14):
     delta = series.diff()
@@ -104,7 +107,7 @@ def add_indicators(df):
     return df
 
 # ======================================================
-# EXCHANGE WRAPPER
+# EXCHANGE LOADING
 # ======================================================
 
 def get_exchange(name):
@@ -114,7 +117,8 @@ def get_exchange(name):
         if name == "bybit":
             return ccxt.bybit({"options": {"defaultType": "linear"}})
         return getattr(ccxt, name)()
-    except:
+    except Exception as e:
+        print("Exchange load error:", e)
         return None
 
 def fetch_pairs(ex):
@@ -126,14 +130,14 @@ def fetch_pairs(ex):
 
 def fetch_df(ex, symbol, tf):
     try:
-        ohlcv = ex.fetch_ohlcv(symbol, timeframe=tf, limit=200)
-        df = pd.DataFrame(ohlcv, columns=["ts","open","high","low","close","volume"])
+        raw = ex.fetch_ohlcv(symbol, timeframe=tf, limit=200)
+        df = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume"])
         return add_indicators(df)
     except:
         return None
 
 # ======================================================
-# ELITE LOGIC — SWEEP → BOS → FVG → PULLBACK
+# ELITE LOGIC
 # ======================================================
 
 def sweep_detect(df, direction):
@@ -146,15 +150,16 @@ def sweep_detect(df, direction):
         return last["high"] > prev["high"] and last["close"] < prev["high"]
     return False
 
-def detect_displacement(df, direction):
+def strong_displacement(df, direction):
     last = df.iloc[-1]
-    body = abs(last["close"] - last["open"])
-    full = last["high"] - last["low"]
 
+    full = last["high"] - last["low"]
     if full == 0:
         return False
 
+    body = abs(last["close"] - last["open"])
     body_ratio = body / full
+
     vol_ok = last["volume"] > df["vol_sma"].iloc[-1] * 1.5
 
     if direction == "long":
@@ -168,33 +173,34 @@ def detect_fvg(df, direction):
     c3 = df.iloc[-1]
 
     if direction == "long":
-        if c1["low"] > c3["high"]:
-            return (c3["high"], c1["low"])  
+        if c1["low"] > c3["high"]:  
+            return (c3["high"], c1["low"])
+
     if direction == "short":
         if c1["high"] < c3["low"]:
             return (c1["high"], c3["low"])
+
     return None
 
 def in_mid_fvg(price, fvg):
     low, high = min(fvg), max(fvg)
-    mid = low + (high - low) * 0.50
-    return low < price < high and price <= mid + (high-low)*0.1
+    mid = low + (high - low) * 0.5
+    return low < price < mid
 
 def generate_signal(df1, df5, df15):
+
+    if len(df1) < 50 or len(df5) < 50 or len(df15) < 50:
+        return None
 
     trend_long = df15["ema50"].iloc[-1] > df15["ema200"].iloc[-1]
     trend_short = df15["ema50"].iloc[-1] < df15["ema200"].iloc[-1]
 
     for direction in ["long", "short"]:
 
-        sweep_1m = sweep_detect(df1, direction)
-        sweep_5m = sweep_detect(df5, direction)
-
-        if not (sweep_1m and sweep_5m):
+        if not (sweep_detect(df1, direction) and sweep_detect(df5, direction)):
             continue
 
-        disp = detect_displacement(df1, direction)
-        if not disp:
+        if not strong_displacement(df1, direction):
             continue
 
         fvg = detect_fvg(df1, direction)
@@ -202,7 +208,6 @@ def generate_signal(df1, df5, df15):
             continue
 
         entry = df1["close"].iloc[-1]
-
         if not in_mid_fvg(entry, fvg):
             continue
 
@@ -214,7 +219,7 @@ def generate_signal(df1, df5, df15):
         sl = df1["low"].iloc[-2] if direction == "long" else df1["high"].iloc[-2]
         R = abs(entry - sl)
 
-        return (direction.upper(), entry, sl, R, fvg)
+        return (direction.upper(), entry, sl, R)
 
     return None
 
@@ -223,22 +228,24 @@ def generate_signal(df1, df5, df15):
 # ======================================================
 
 def quality_rating(df):
-    last = df.iloc[-1]
-    vol = last["volume"]
-    atr = last["atr"]
-    std = last["std"]
-    vol_sma = df["vol_sma"].iloc[-1]
+    try:
+        last = df.iloc[-1]
+        score = 0
 
-    score = 0
-    if vol > vol_sma * 2: score += 1
-    if atr > df["atr"].rolling(20).mean().iloc[-1]: score += 1
-    if std > df["std"].rolling(20).mean().iloc[-1]: score += 1
+        if last["volume"] > df["vol_sma"].iloc[-1] * 2:
+            score += 1
+        if last["atr"] > df["atr"].rolling(20).mean().iloc[-1]:
+            score += 1
+        if last["std"] > df["std"].rolling(20).mean().iloc[-1]:
+            score += 1
 
-    if score == 3:
-        return "EXTREME"
-    if score == 2:
-        return "VERY HIGH"
-    return "HIGH"
+        if score == 3:
+            return "EXTREME"
+        if score == 2:
+            return "VERY HIGH"
+        return "HIGH"
+    except:
+        return "HIGH"
 
 # ======================================================
 # SEND SIGNAL
@@ -249,61 +256,82 @@ def send_signal(symbol, ex_name, direction, entry, sl, tp1, tp2, tp3, quality):
     lev = "10x–25x" if ("BTC" in symbol or "ETH" in symbol) else "5x–15x"
 
     msg = (
-        f"🔥 ELITE SCALPING SIGNAL — {direction}\n\n"
-        f"Pair: {symbol}\n"
-        f"Exchange: {ex_name.upper()}\n"
-        f"Entry: {entry}\n\n"
-        f"Stop Loss: {sl}\n"
-        f"TP1 (1.5R): {tp1}\n"
-        f"TP2 (2.5R): {tp2}\n"
-        f"TP3 (4R): {tp3}\n\n"
-        f"Recommended Leverage: {lev}\n"
-        f"Quality: {quality}\n"
-        f"Time: {ts}\n"
+        f"🔥 *ELITE SCALPING SIGNAL — {direction}*\n\n"
+        f"*Pair:* {symbol}\n"
+        f"*Exchange:* {ex_name.upper()}\n"
+        f"*Entry:* {entry}\n\n"
+        f"*Stop Loss:* {sl}\n"
+        f"*TP1 (1.5R):* {tp1}\n"
+        f"*TP2 (2.5R):* {tp2}\n"
+        f"*TP3 (4R):* {tp3}\n\n"
+        f"*Leverage:* {lev}\n"
+        f"*Quality:* {quality}\n"
+        f"*Time:* {ts}\n"
     )
+
     send_telegram(msg)
 
 # ======================================================
-# MAIN SCANNER
+# SYMBOL PROCESSING
 # ======================================================
 
-def scanner():
+def process_symbol(ex, ex_name, symbol):
+    if symbol in blacklist:
+        return
+
+    try:
+        df1 = fetch_df(ex, symbol, "1m")
+        df5 = fetch_df(ex, symbol, "5m")
+        df15 = fetch_df(ex, symbol, "15m")
+
+        if df1 is None or df5 is None or df15 is None:
+            blacklist.add(symbol)
+            return
+
+        if len(df1) < 50 or len(df5) < 50 or len(df15) < 50:
+            blacklist.add(symbol)
+            return
+
+        result = generate_signal(df1, df5, df15)
+        if not result:
+            return
+
+        direction, entry, sl, R = result
+
+        if not allow_signal(symbol, direction):
+            return
+
+        tp1 = entry + 1.5*R if direction == "LONG" else entry - 1.5*R
+        tp2 = entry + 2.5*R if direction == "LONG" else entry - 2.5*R
+        tp3 = entry + 4*R   if direction == "LONG" else entry - 4*R
+
+        q = quality_rating(df1)
+
+        send_signal(symbol, ex_name, direction, entry, sl, tp1, tp2, tp3, q)
+
+    except Exception as e:
+        print(f"SERIOUS ERROR ({symbol}):", e)
+        blacklist.add(symbol)
+
+# ======================================================
+# MAIN SCANNER LOOP
+# ======================================================
+
+def scanner_loop():
     send_startup()
 
     while True:
         for ex_name in EXCHANGES:
+
             ex = get_exchange(ex_name)
             if not ex:
                 continue
 
-            for symbol in fetch_pairs(ex):
-                try:
-                    df1 = fetch_df(ex, symbol, "1m")
-                    df5 = fetch_df(ex, symbol, "5m")
-                    df15 = fetch_df(ex, symbol, "15m")
+            symbols = fetch_pairs(ex)
 
-                    if df1 is None or df5 is None or df15 is None:
-                        continue
-
-                    result = generate_signal(df1, df5, df15)
-                    if not result:
-                        continue
-
-                    direction, entry, sl, R, fvg = result
-
-                    if not allow_signal(symbol, direction):
-                        continue
-
-                    tp1 = entry + 1.5*R if direction=="LONG" else entry - 1.5*R
-                    tp2 = entry + 2.5*R if direction=="LONG" else entry - 2.5*R
-                    tp3 = entry + 4*R   if direction=="LONG" else entry - 4*R
-
-                    quality = quality_rating(df1)
-
-                    send_signal(symbol, ex_name, direction, entry, sl, tp1, tp2, tp3, quality)
-
-                except Exception as e:
-                    print("Error:", symbol, e)
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                for symbol in symbols:
+                    executor.submit(process_symbol, ex, ex_name, symbol)
 
         time.sleep(SCAN_INTERVAL)
 
@@ -315,9 +343,9 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ELITE SCALPING BOT RUNNING"
+    return "ELITE SCALPER BOT RUNNING"
 
-threading.Thread(target=scanner, daemon=True).start()
+threading.Thread(target=scanner_loop, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
