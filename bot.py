@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SCAN_INTERVAL = 10  # every 10 seconds
+SCAN_INTERVAL = 10
 PAIR_LIMIT = 50
 
 EXCHANGES = [
@@ -27,7 +27,7 @@ EXCHANGES = [
 ]
 
 # ======================================================
-# TELEGRAM SENDER
+# TELEGRAM
 # ======================================================
 
 def send_telegram(text):
@@ -36,22 +36,21 @@ def send_telegram(text):
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
             f"?chat_id={CHAT_ID}&text={text}"
         )
-    except Exception as e:
-        print("Telegram error:", e)
+    except:
+        pass
 
-# ======================================================
-# STARTUP MESSAGE
-# ======================================================
-
-def send_startup_message():
+def send_startup():
     msg = (
-        "🚀 *SCALPING BOT ACTIVE*\n\n"
-        "Engine: Liquidity Sweep + Trend + Momentum\n"
-        "Timeframes: 1m entries + 15m trend bias\n"
-        "Scan Interval: 10s\n"
-        "TP System: 1.5R / 2.5R / 4R\n"
-        "Duplicate Protection: ON\n"
-        "Exchanges: Binance, Binance Futures, Kucoin, Bybit, OKX\n"
+        "🚀 *ELITE SCALPING BOT ONLINE*\n\n"
+        "• Multi-timeframe Liquidity Sweep\n"
+        "• Strong Displacement (60% body + vol spike)\n"
+        "• Strict FVG Detection\n"
+        "• Mid-level Pullback Entry\n"
+        "• 15m Trend Filter\n"
+        "• Dynamic Quality Rating\n"
+        "• TP Targets: 1.5R / 2.5R / 4R\n"
+        "• Exchanges: Binance, Binance Futures, Kucoin, Bybit, OKX\n"
+        "• Scan Interval: 10 seconds\n"
     )
     send_telegram(msg)
 
@@ -60,8 +59,7 @@ def send_startup_message():
 # ======================================================
 
 recent_signals = {}
-DUPLICATE_WINDOW = 1800  # 30 minutes
-
+DUPLICATE_WINDOW = 1800
 
 def allow_signal(symbol, direction):
     now = time.time()
@@ -85,28 +83,28 @@ def allow_signal(symbol, direction):
 def ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
 
-
-def compute_rsi(series, length=14):
+def rsi(series, length=14):
     delta = series.diff()
     up = delta.clip(lower=0)
     down = -delta.clip(upper=0)
-    avg_gain = up.rolling(length).mean()
-    avg_loss = down.rolling(length).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    return 100 - (100 / (1 + rs))
-
+    avg_up = up.rolling(length).mean()
+    avg_down = down.rolling(length).mean()
+    rs = avg_up / (avg_down + 1e-10)
+    return 100 - 100/(1+rs)
 
 def add_indicators(df):
     df["ema9"] = ema(df["close"], 9)
     df["ema21"] = ema(df["close"], 21)
     df["ema50"] = ema(df["close"], 50)
     df["ema200"] = ema(df["close"], 200)
-    df["rsi"] = compute_rsi(df["close"])
-    df["volume_sma"] = df["volume"].rolling(20).mean()
+    df["rsi"] = rsi(df["close"])
+    df["vol_sma"] = df["volume"].rolling(20).mean()
+    df["atr"] = (df["high"] - df["low"]).rolling(14).mean()
+    df["std"] = df["close"].rolling(20).std()
     return df
 
 # ======================================================
-# EXCHANGE SETUP
+# EXCHANGE WRAPPER
 # ======================================================
 
 def get_exchange(name):
@@ -119,17 +117,12 @@ def get_exchange(name):
     except:
         return None
 
-
 def fetch_pairs(ex):
     try:
-        markets = ex.load_markets()
-        return [s for s in markets if s.endswith("USDT")][:PAIR_LIMIT]
+        mk = ex.load_markets()
+        return [s for s in mk if s.endswith("USDT")][:PAIR_LIMIT]
     except:
         return []
-
-# ======================================================
-# SCALPING LOGIC
-# ======================================================
 
 def fetch_df(ex, symbol, tf):
     try:
@@ -139,8 +132,11 @@ def fetch_df(ex, symbol, tf):
     except:
         return None
 
+# ======================================================
+# ELITE LOGIC — SWEEP → BOS → FVG → PULLBACK
+# ======================================================
 
-def detect_sweep(df, direction):
+def sweep_detect(df, direction):
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
@@ -150,81 +146,129 @@ def detect_sweep(df, direction):
         return last["high"] > prev["high"] and last["close"] < prev["high"]
     return False
 
+def detect_displacement(df, direction):
+    last = df.iloc[-1]
+    body = abs(last["close"] - last["open"])
+    full = last["high"] - last["low"]
 
-def generate_signal(df1, df15):
-    # 15m trend filter
+    if full == 0:
+        return False
+
+    body_ratio = body / full
+    vol_ok = last["volume"] > df["vol_sma"].iloc[-1] * 1.5
+
+    if direction == "long":
+        return last["close"] > last["open"] and body_ratio >= 0.60 and vol_ok
+
+    if direction == "short":
+        return last["open"] > last["close"] and body_ratio >= 0.60 and vol_ok
+
+def detect_fvg(df, direction):
+    c1 = df.iloc[-3]
+    c3 = df.iloc[-1]
+
+    if direction == "long":
+        if c1["low"] > c3["high"]:
+            return (c3["high"], c1["low"])  
+    if direction == "short":
+        if c1["high"] < c3["low"]:
+            return (c1["high"], c3["low"])
+    return None
+
+def in_mid_fvg(price, fvg):
+    low, high = min(fvg), max(fvg)
+    mid = low + (high - low) * 0.50
+    return low < price < high and price <= mid + (high-low)*0.1
+
+def generate_signal(df1, df5, df15):
+
     trend_long = df15["ema50"].iloc[-1] > df15["ema200"].iloc[-1]
     trend_short = df15["ema50"].iloc[-1] < df15["ema200"].iloc[-1]
 
-    # sweeps
-    sweep_long = detect_sweep(df1, "long")
-    sweep_short = detect_sweep(df1, "short")
+    for direction in ["long", "short"]:
 
-    # momentum
-    momentum_long = df1["ema9"].iloc[-1] > df1["ema21"].iloc[-1]
-    momentum_short = df1["ema9"].iloc[-1] < df1["ema21"].iloc[-1]
+        sweep_1m = sweep_detect(df1, direction)
+        sweep_5m = sweep_detect(df5, direction)
 
-    # RSI reversal
-    rsi = df1["rsi"].iloc[-1]
+        if not (sweep_1m and sweep_5m):
+            continue
 
-    # volume spike
-    vol = df1["volume"].iloc[-1]
-    vol_sma = df1["volume_sma"].iloc[-1]
-    volume_spike = vol > vol_sma * 1.5
+        disp = detect_displacement(df1, direction)
+        if not disp:
+            continue
 
-    # LONG setup
-    if trend_long and sweep_long and momentum_long and rsi > 35 and volume_spike:
+        fvg = detect_fvg(df1, direction)
+        if not fvg:
+            continue
+
         entry = df1["close"].iloc[-1]
-        sl = df1["low"].iloc[-2]
-        R = entry - sl
-        return ("LONG", entry, sl, R)
 
-    # SHORT setup
-    if trend_short and sweep_short and momentum_short and rsi < 65 and volume_spike:
-        entry = df1["close"].iloc[-1]
-        sl = df1["high"].iloc[-2]
-        R = sl - entry
-        return ("SHORT", entry, sl, R)
+        if not in_mid_fvg(entry, fvg):
+            continue
+
+        if direction == "long" and not trend_long:
+            continue
+        if direction == "short" and not trend_short:
+            continue
+
+        sl = df1["low"].iloc[-2] if direction == "long" else df1["high"].iloc[-2]
+        R = abs(entry - sl)
+
+        return (direction.upper(), entry, sl, R, fvg)
 
     return None
 
 # ======================================================
-# TELEGRAM SIGNAL FORMAT
+# QUALITY RATING
 # ======================================================
 
-def send_signal(symbol, exchange_name, direction, entry, sl, tp1, tp2, tp3):
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+def quality_rating(df):
+    last = df.iloc[-1]
+    vol = last["volume"]
+    atr = last["atr"]
+    std = last["std"]
+    vol_sma = df["vol_sma"].iloc[-1]
 
-    lev = "10x–25x" if "BTC" in symbol or "ETH" in symbol else "5x–15x"
+    score = 0
+    if vol > vol_sma * 2: score += 1
+    if atr > df["atr"].rolling(20).mean().iloc[-1]: score += 1
+    if std > df["std"].rolling(20).mean().iloc[-1]: score += 1
+
+    if score == 3:
+        return "EXTREME"
+    if score == 2:
+        return "VERY HIGH"
+    return "HIGH"
+
+# ======================================================
+# SEND SIGNAL
+# ======================================================
+
+def send_signal(symbol, ex_name, direction, entry, sl, tp1, tp2, tp3, quality):
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    lev = "10x–25x" if ("BTC" in symbol or "ETH" in symbol) else "5x–15x"
 
     msg = (
-        f"🔥 SCALPING SIGNAL — {direction}\n\n"
+        f"🔥 ELITE SCALPING SIGNAL — {direction}\n\n"
         f"Pair: {symbol}\n"
-        f"Exchange: {exchange_name.upper()}\n"
+        f"Exchange: {ex_name.upper()}\n"
         f"Entry: {entry}\n\n"
-        f"Reason:\n"
-        f" • 1m Liquidity Sweep\n"
-        f" • 15m Trend Alignment\n"
-        f" • EMA Momentum\n"
-        f" • RSI Reversal\n"
-        f" • Volume Spike\n\n"
         f"Stop Loss: {sl}\n"
         f"TP1 (1.5R): {tp1}\n"
         f"TP2 (2.5R): {tp2}\n"
         f"TP3 (4R): {tp3}\n\n"
         f"Recommended Leverage: {lev}\n"
-        f"Time: {timestamp}\n"
-        f"Quality: HIGH\n"
+        f"Quality: {quality}\n"
+        f"Time: {ts}\n"
     )
-
     send_telegram(msg)
 
 # ======================================================
 # MAIN SCANNER
 # ======================================================
 
-def scanner_loop():
-    send_startup_message()
+def scanner():
+    send_startup()
 
     while True:
         for ex_name in EXCHANGES:
@@ -232,52 +276,48 @@ def scanner_loop():
             if not ex:
                 continue
 
-            pairs = fetch_pairs(ex)
-
-            for symbol in pairs:
+            for symbol in fetch_pairs(ex):
                 try:
                     df1 = fetch_df(ex, symbol, "1m")
+                    df5 = fetch_df(ex, symbol, "5m")
                     df15 = fetch_df(ex, symbol, "15m")
-                    if df1 is None or df15 is None:
+
+                    if df1 is None or df5 is None or df15 is None:
                         continue
 
-                    result = generate_signal(df1, df15)
+                    result = generate_signal(df1, df5, df15)
                     if not result:
                         continue
 
-                    direction, entry, sl, R = result
+                    direction, entry, sl, R, fvg = result
 
                     if not allow_signal(symbol, direction):
                         continue
 
-                    # compute take profits
-                    if direction == "LONG":
-                        tp1 = entry + 1.5 * R
-                        tp2 = entry + 2.5 * R
-                        tp3 = entry + 4 * R
-                    else:
-                        tp1 = entry - 1.5 * R
-                        tp2 = entry - 2.5 * R
-                        tp3 = entry - 4 * R
+                    tp1 = entry + 1.5*R if direction=="LONG" else entry - 1.5*R
+                    tp2 = entry + 2.5*R if direction=="LONG" else entry - 2.5*R
+                    tp3 = entry + 4*R   if direction=="LONG" else entry - 4*R
 
-                    send_signal(symbol, ex_name, direction, entry, sl, tp1, tp2, tp3)
+                    quality = quality_rating(df1)
+
+                    send_signal(symbol, ex_name, direction, entry, sl, tp1, tp2, tp3, quality)
 
                 except Exception as e:
-                    print("Error on pair:", symbol, e)
+                    print("Error:", symbol, e)
 
         time.sleep(SCAN_INTERVAL)
 
 # ======================================================
-# FLASK KEEP-ALIVE SERVER
+# FLASK KEEP-ALIVE
 # ======================================================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "SCALPING SIGNAL BOT RUNNING"
+    return "ELITE SCALPING BOT RUNNING"
 
-threading.Thread(target=scanner_loop, daemon=True).start()
+threading.Thread(target=scanner, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
