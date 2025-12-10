@@ -16,10 +16,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID   = os.getenv("CHAT_ID")
 PORT      = int(os.getenv("PORT", 10000))
 
-SCAN_INTERVAL = 20           # fast scalping interval
-PAIR_LIMIT    = 80           # scan more symbols, movers filter will shrink it
-
-TOP_MOVER_COUNT = 20         # option B
+SCAN_INTERVAL = 20
+PAIR_LIMIT    = 80
+TOP_MOVER_COUNT = 20
 
 EXCHANGES = [
     "binance",
@@ -30,7 +29,7 @@ EXCHANGES = [
 ]
 
 recent_signals = {}
-WINDOW = 1800  # 30 min duplicate prevention
+WINDOW = 1800  # 30 min duplicate protection
 
 # ======================================================
 # TELEGRAM
@@ -46,7 +45,10 @@ def send_telegram(text):
         pass
 
 def startup():
-    send_telegram("🚀 QUICK-SCALP BREAKOUT BOT RUNNING\nTop movers + controlled aggressive mode active.")
+    send_telegram(
+        "🚀 QUICK-SCALP BREAKOUT BOT ACTIVE\n"
+        "Controlled Aggressive Mode + Top Movers Enabled."
+    )
 
 # ======================================================
 # DUPLICATE PROTECTION
@@ -63,8 +65,7 @@ def allow(symbol, direction, price):
         recent_signals[symbol][key] = now
         return True
 
-    last_time = recent_signals[symbol][key]
-    if now - last_time > WINDOW:
+    if now - recent_signals[symbol][key] > WINDOW:
         recent_signals[symbol][key] = now
         return True
 
@@ -77,9 +78,9 @@ def allow(symbol, direction, price):
 def get_ex(name):
     try:
         if name == "binance_futures":
-            return ccxt.binance({"options":{"defaultType":"future"}})
+            return ccxt.binance({"options": {"defaultType": "future"}})
         if name == "bybit":
-            return ccxt.bybit({"options":{"defaultType":"linear"}})
+            return ccxt.bybit({"options": {"defaultType": "linear"}})
         return getattr(ccxt, name)()
     except:
         return None
@@ -96,7 +97,7 @@ def get_pairs(ex):
 # ======================================================
 
 def add_indicators(df):
-    df["ema9"]  = df["close"].ewm(span=9).mean()
+    df["ema9"] = df["close"].ewm(span=9).mean()
     df["ema20"] = df["close"].ewm(span=20).mean()
     df["vol_sma"] = df["volume"].rolling(20).mean()
     df["atr"] = (df["high"] - df["low"]).rolling(14).mean()
@@ -112,74 +113,60 @@ def get_df(ex, symbol, tf):
         return None
 
 # ======================================================
-# TOP MOVER DETECTION (Hybrid)
+# HYBRID TOP MOVER DETECTION
 # ======================================================
 
 def detect_top_movers(ex):
     movers = []
-
     pairs = get_pairs(ex)
+
     for s in pairs:
         df = get_df(ex, s, "15m")
         if df is None or len(df) < 20:
             continue
 
-        # price momentum
         pct_change = (df["close"].iloc[-1] - df["close"].iloc[-4]) / df["close"].iloc[-4] * 100
-
-        # volume momentum
         vol_ratio = df["volume"].iloc[-1] / (df["vol_sma"].iloc[-1] + 1e-10)
 
         score = pct_change * 0.6 + vol_ratio * 0.4
         movers.append((s, score))
 
-    # sort descending by score
     movers_sorted = sorted(movers, key=lambda x: x[1], reverse=True)
-
-    # return only top N movers
     return [m[0] for m in movers_sorted[:TOP_MOVER_COUNT]]
 
 # ======================================================
-# SCALPING BREAKOUT LOGIC (Controlled Aggressive)
+# SCALPING BREAKOUT LOGIC
 # ======================================================
 
 def breakout_long(df5):
     last = df5.iloc[-1]
-    p1   = df5.iloc[-2]
-    p2   = df5.iloc[-3]
+    p1 = df5.iloc[-2]
+    p2 = df5.iloc[-3]
 
-    # Trend alignment — tight scalper trend
     if not (last["ema9"] > last["ema20"]):
         return False
 
-    # Volatility confirmation
     if not (last["atr"] > p1["atr"] * 1.12):
         return False
 
-    # Volume confirmation
     if not (last["volume"] > last["vol_sma"] * 1.4):
         return False
 
-    # Breakout level
     breakout = max(p1["high"], p2["high"])
 
-    # light sensitivity — scalper logic
     if not (last["close"] > breakout * 1.0008):
         return False
 
-    # ignition candle
     body = last["close"] - last["open"]
-    if body <= 0:
-        return False
-    if body < 0.52 * last["range"]:
+    if body <= 0 or body < 0.52 * last["range"]:
         return False
 
     return True
 
 def breakout_short(df5):
     last = df5.iloc[-1]
-    p1   = df5.iloc[-2]
-    p2   = df5.iloc[-3]
+    p1 = df5.iloc[-2]
+    p2 = df5.iloc[-3]
 
     if not (last["ema9"] < last["ema20"]):
         return False
@@ -196,20 +183,18 @@ def breakout_short(df5):
         return False
 
     body = last["open"] - last["close"]
-    if body <= 0:
-        return False
-    if body < 0.52 * last["range"]:
+    if body <= 0 or body < 0.52 * last["range"]:
         return False
 
     return True
 
 # ======================================================
-# SEND SIGNAL
+# SIGNAL MESSAGE WITH CHALLENGE FRAMEWORK (NO PROGRESSION)
 # ======================================================
 
 def send_signal(symbol, direction, price, atr):
 
-    # ATR-based stops & targets
+    # SL + TP targets
     if direction == "LONG":
         sl  = price - 1.6 * atr
         tp1 = price + 1.2 * atr
@@ -221,82 +206,24 @@ def send_signal(symbol, direction, price, atr):
         tp2 = price - 2.0 * atr
         tp3 = price - 3.5 * atr
 
-    # leverage suggestion (non-advice)
+    # leverage suggestion (general)
     lv = (
         "10–20x" if ("BTC" in symbol or "ETH" in symbol)
-        else "8–15x" if ("SOL" in symbol or "AVAX" in symbol or "BNB" in symbol or "LINK" in symbol)
+        else "8–15x" if any(x in symbol for x in ["SOL", "AVAX", "LINK", "BNB"])
         else "5–10x"
     )
 
+    # generic challenge framework
+    hypothetical_account = 100
+    risk_percent = 0.01
+    risk_amount  = hypothetical_account * risk_percent
+
+    stop_distance = abs(price - sl) / price
+    stop_distance = stop_distance if stop_distance > 0 else 0.0001
+
+    example_size = risk_amount / stop_distance
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
     msg = (
         f"🔥 QUICK-SCALP {direction}\n\n"
-        f"Pair: {symbol}\n"
-        f"Entry: {round(price,6)}\n"
-        f"ATR: {round(atr,6)}\n\n"
-        f"SL:  {round(sl,6)}\n"
-        f"TP1: {round(tp1,6)}\n"
-        f"TP2: {round(tp2,6)}\n"
-        f"TP3: {round(tp3,6)}\n\n"
-        f"Suggested Leverage: {lv}\n"
-        f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
-    )
-
-    send_telegram(msg)
-
-# ======================================================
-# MAIN SCANNER LOOP
-# ======================================================
-
-def scanner_loop():
-
-    startup()
-
-    while True:
-
-        for ex_name in EXCHANGES:
-
-            ex = get_ex(ex_name)
-            if not ex:
-                continue
-
-            # get top movers
-            movers = detect_top_movers(ex)
-
-            for symbol in movers:
-
-                try:
-                    df5 = get_df(ex, symbol, "5m")
-                    if df5 is None or len(df5) < 20:
-                        continue
-
-                    last = df5.iloc[-1]
-                    atr = last["atr"]
-
-                    # LONG
-                    if breakout_long(df5):
-                        if allow(symbol, "LONG", last["close"]):
-                            send_signal(symbol, "LONG", last["close"], atr)
-
-                    # SHORT
-                    if breakout_short(df5):
-                        if allow(symbol, "SHORT", last["close"]):
-                            send_signal(symbol, "SHORT", last["close"], atr)
-
-                except:
-                    continue
-
-        time.sleep(SCAN_INTERVAL)
-
-# ======================================================
-# FLASK SERVER (Render requirement)
-# ======================================================
-
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "QUICK-SCALP BREAKOUT BOT RUNNING"
-
-if __name__ == "__main__":
-    threading.Thread(target=scanner_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=PORT)
