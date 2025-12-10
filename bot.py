@@ -227,3 +227,80 @@ def send_signal(symbol, direction, price, atr):
 
     msg = (
         f"🔥 QUICK-SCALP {direction}\n\n"
+        f"Pair: {symbol}\n"
+        f"Entry: {round(price,6)}\n"
+        f"ATR: {round(atr,6)}\n\n"
+        f"SL:  {round(sl,6)}\n"
+        f"TP1: {round(tp1,6)}\n"
+        f"TP2: {round(tp2,6)}\n"
+        f"TP3: {round(tp3,6)}\n\n"
+        f"Suggested Leverage: {lv}\n"
+        f"Time: {ts}\n\n"
+
+        f"📈 Challenge Framework (General Example Only)\n"
+        f"Hypothetical Starting Account: ${hypothetical_account}\n"
+        f"Risk Tier Example (1%): ${risk_amount:.2f}\n"
+        f"Stop Distance: {stop_distance*100:.2f}%\n"
+        f"Example Formula:\n"
+        f"    size = risk_amount / stop_distance\n"
+        f"    size ≈ ${example_size:.2f} (example only)\n\n"
+
+        f"🧠 Challenge Mindset (General Note):\n"
+        f"Consistency, discipline, and controlled exposure are key. "
+        f"This is technical guidance only — not financial advice."
+    )
+
+    send_telegram(msg)
+
+# ======================================================
+# MAIN SCANNER LOOP
+# ======================================================
+
+def scanner_loop():
+
+    startup()
+
+    while True:
+        for ex_name in EXCHANGES:
+
+            ex = get_ex(ex_name)
+            if not ex:
+                continue
+
+            movers = detect_top_movers(ex)
+
+            for symbol in movers:
+                try:
+                    df5 = get_df(ex, symbol, "5m")
+                    if df5 is None or len(df5) < 20:
+                        continue
+
+                    last = df5.iloc[-1]
+                    atr  = last["atr"]
+
+                    if breakout_long(df5):
+                        if allow(symbol, "LONG", last["close"]):
+                            send_signal(symbol, "LONG", last["close"], atr)
+
+                    if breakout_short(df5):
+                        if allow(symbol, "SHORT", last["close"]):
+                            send_signal(symbol, "SHORT", last["close"], atr)
+
+                except:
+                    continue
+
+        time.sleep(SCAN_INTERVAL)
+
+# ======================================================
+# FLASK SERVER (Render requirement)
+# ======================================================
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "QUICK-SCALP BREAKOUT BOT RUNNING"
+
+if __name__ == "__main__":
+    threading.Thread(target=scanner_loop, daemon=True).start()
+    app.run(host="0.0.0.0", port=PORT)
