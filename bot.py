@@ -16,9 +16,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID   = os.getenv("CHAT_ID")
 PORT      = int(os.getenv("PORT", 10000))
 
-SCAN_INTERVAL = 15            # Faster for scalping
-PAIR_LIMIT    = 80
-TOP_MOVER_COUNT = 12          # Explosive RR = strongest pairs only
+SCAN_INTERVAL = 20
+PAIR_LIMIT = 80
+TOP_MOVER_COUNT = 12
 
 EXCHANGES = [
     "binance",
@@ -29,7 +29,7 @@ EXCHANGES = [
 ]
 
 recent_signals = {}
-WINDOW = 1800  # 30 mins
+WINDOW = 1800  # 30-minute duplicate protection
 
 # ======================================================
 # TELEGRAM
@@ -45,7 +45,10 @@ def send_telegram(text):
         pass
 
 def startup():
-    send_telegram("🚀 EXPLOSIVE RR SCALP BOT ACTIVE\nHigh-return breakout mode enabled.")
+    send_telegram(
+        "🚀 EXPLOSIVE RR SCALP BOT RUNNING\n"
+        "5m + 15m Trend Alignment + ATR Regime + Volume Expansion."
+    )
 
 # ======================================================
 # DUPLICATE PROTECTION
@@ -69,6 +72,31 @@ def allow(symbol, direction):
     return False
 
 # ======================================================
+# INDICATORS
+# ======================================================
+
+def add_indicators(df):
+    df["ema9"]  = df["close"].ewm(span=9).mean()
+    df["ema20"] = df["close"].ewm(span=20).mean()
+    df["ema50"] = df["close"].ewm(span=50).mean()
+
+    df["vol_sma"] = df["volume"].rolling(20).mean()
+    df["atr_raw"] = (df["high"] - df["low"])
+    df["atr"] = df["atr_raw"].rolling(14).mean()
+    df["atr_sma"] = df["atr"].rolling(14).mean()
+
+    df["range"] = df["high"] - df["low"]
+    return df
+
+def get_df(ex, symbol, tf):
+    try:
+        data = ex.fetch_ohlcv(symbol, tf, limit=120)
+        df = pd.DataFrame(data, columns=["ts","open","high","low","close","volume"])
+        return add_indicators(df)
+    except:
+        return None
+
+# ======================================================
 # EXCHANGE HELPERS
 # ======================================================
 
@@ -90,28 +118,7 @@ def get_pairs(ex):
         return []
 
 # ======================================================
-# INDICATORS
-# ======================================================
-
-def add_indicators(df):
-    df["ema9"]  = df["close"].ewm(span=9).mean()
-    df["ema20"] = df["close"].ewm(span=20).mean()
-    df["ema50"] = df["close"].ewm(span=50).mean()
-    df["vol_sma"] = df["volume"].rolling(20).mean()
-    df["atr"] = (df["high"] - df["low"]).rolling(14).mean()
-    df["range"] = df["high"] - df["low"]
-    return df
-
-def get_df(ex, symbol, tf):
-    try:
-        data = ex.fetch_ohlcv(symbol, tf, limit=120)
-        df = pd.DataFrame(data, columns=["ts","open","high","low","close","volume"])
-        return add_indicators(df)
-    except:
-        return None
-
-# ======================================================
-# HYBRID TOP MOVER DETECTION
+# HYBRID TOP MOVERS
 # ======================================================
 
 def detect_top_movers(ex):
@@ -133,51 +140,84 @@ def detect_top_movers(ex):
     return [m[0] for m in movers_sorted[:TOP_MOVER_COUNT]]
 
 # ======================================================
-# EXPLOSIVE RR SCALPING BREAKOUT LOGIC
+# TREND ALIGNMENT (5m + 15m)
 # ======================================================
 
-def breakout_long(df5):
+def trend_long(df5, df15):
+    return (
+        df5["ema9"].iloc[-1] > df5["ema20"].iloc[-1] > df5["ema50"].iloc[-1] and
+        df15["ema9"].iloc[-1] > df15["ema20"].iloc[-1] > df15["ema50"].iloc[-1]
+    )
+
+def trend_short(df5, df15):
+    return (
+        df5["ema9"].iloc[-1] < df5["ema20"].iloc[-1] < df5["ema50"].iloc[-1] and
+        df15["ema9"].iloc[-1] < df15["ema20"].iloc[-1] < df15["ema50"].iloc[-1]
+    )
+
+# ======================================================
+# VOLATILITY + VOLUME FILTERS
+# ======================================================
+
+def volatility_ok(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    return (
+        last["atr"] > last["atr_sma"] and
+        last["atr"] > prev["atr"] * 1.02
+    )
+
+def volume_ok(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    return (
+        last["volume"] > last["vol_sma"] * 1.7 and
+        last["volume"] > prev["volume"]
+    )
+
+# ======================================================
+# BREAKOUT LOGIC (EXPLOSIVE RR MODE)
+# ======================================================
+
+def breakout_long(df5, df15):
     last = df5.iloc[-1]
-    p1   = df5.iloc[-2]
-    p2   = df5.iloc[-3]
+    p1 = df5.iloc[-2]
+    p2 = df5.iloc[-3]
 
-    # Strong trend stack for explosive breakouts
-    if not (last["ema9"] > last["ema20"] > last["ema50"]):
+    if not trend_long(df5, df15):
         return False
 
-    # ATR expansion (looser)
-    if not (last["atr"] > p1["atr"] * 1.08):
+    if not volatility_ok(df5):
         return False
 
-    # Volume expansion (looser but required)
-    if not (last["volume"] > last["vol_sma"] * 1.25):
+    if not volume_ok(df5):
         return False
 
     breakout = max(p1["high"], p2["high"])
 
-    # Early breakout capture
     if not (last["close"] > breakout * 1.0004):
         return False
 
-    # Ignition candle
     body = last["close"] - last["open"]
     if body <= 0 or body < 0.50 * last["range"]:
         return False
 
     return True
 
-def breakout_short(df5):
+def breakout_short(df5, df15):
     last = df5.iloc[-1]
-    p1   = df5.iloc[-2]
-    p2   = df5.iloc[-3]
+    p1 = df5.iloc[-2]
+    p2 = df5.iloc[-3]
 
-    if not (last["ema9"] < last["ema20"] < last["ema50"]):
+    if not trend_short(df5, df15):
         return False
 
-    if not (last["atr"] > p1["atr"] * 1.08):
+    if not volatility_ok(df5):
         return False
 
-    if not (last["volume"] > last["vol_sma"] * 1.25):
+    if not volume_ok(df5):
         return False
 
     breakdown = min(p1["low"], p2["low"])
@@ -192,12 +232,11 @@ def breakout_short(df5):
     return True
 
 # ======================================================
-# SIGNAL SYSTEM (EXPLOSIVE RR)
+# SIGNAL MESSAGE
 # ======================================================
 
 def send_signal(symbol, direction, price, atr):
 
-    # Tighter stop, bigger returns
     if direction == "LONG":
         sl  = price - 1.3 * atr
         tp1 = price + 2.0 * atr
@@ -211,21 +250,17 @@ def send_signal(symbol, direction, price, atr):
         tp3 = price - 7.0 * atr
         tp4 = price -12.0 * atr
 
-    # generic (non-advice) classification of leverage tiers
     lv = (
         "10–20x" if ("BTC" in symbol or "ETH" in symbol)
-        else "8–15x" if any(x in symbol for x in ["SOL", "AVAX", "LINK", "BNB"])
+        else "8–15x" if any(x in symbol for x in ["SOL","AVAX","LINK","BNB"])
         else "5–10x"
     )
 
-    # general challenge framework
     hypothetical_account = 100
     risk_percent = 0.01
-    risk_amount  = hypothetical_account * risk_percent
+    risk_amount = hypothetical_account * risk_percent
 
-    stop_distance = abs(price - sl) / price
-    stop_distance = stop_distance if stop_distance > 0 else 0.0001
-
+    stop_distance = abs(price - sl) / price or 0.0001
     example_size = risk_amount / stop_distance
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -235,33 +270,29 @@ def send_signal(symbol, direction, price, atr):
         f"Pair: {symbol}\n"
         f"Entry: {round(price,6)}\n"
         f"ATR: {round(atr,6)}\n\n"
-
         f"SL:  {round(sl,6)}\n"
         f"TP1: {round(tp1,6)}\n"
         f"TP2: {round(tp2,6)}\n"
         f"TP3: {round(tp3,6)}\n"
         f"TP4: {round(tp4,6)}\n\n"
-
         f"Suggested Leverage Tier: {lv}\n"
         f"Time: {ts}\n\n"
-
         f"📈 Challenge Framework (General Example Only)\n"
-        f"Example Starting Account: ${hypothetical_account}\n"
-        f"Risk Tier Example (1%): ${risk_amount:.2f}\n"
-        f"Stop Distance: {stop_distance*100:.2f}%\n"
-        f"Formula Example:\n"
+        f"- Example Starting Account: $100\n"
+        f"- Example Risk Tier (1%): ${risk_amount:.2f}\n"
+        f"- Stop Distance: {stop_distance*100:.2f}%\n"
+        f"- Example Formula:\n"
         f"    size = risk_amount / stop_distance\n"
         f"    size ≈ ${example_size:.2f}\n\n"
-
-        f"🧠 Challenge Mindset (General Note):\n"
-        f"Explosive setups require discipline and consistency. "
+        f"🧠 General Mindset Note:\n"
+        f"Strong trend alignment + rising volatility can create cleaner setups.\n"
         f"This is technical information only — not financial advice."
     )
 
     send_telegram(msg)
 
 # ======================================================
-# MAIN SCANNER LOOP
+# MAIN LOOP
 # ======================================================
 
 def scanner_loop():
@@ -279,18 +310,20 @@ def scanner_loop():
 
             for symbol in movers:
                 try:
-                    df5 = get_df(ex, symbol, "5m")
-                    if df5 is None or len(df5) < 20:
+                    df5  = get_df(ex, symbol, "5m")
+                    df15 = get_df(ex, symbol, "15m")
+
+                    if df5 is None or df15 is None:
                         continue
 
                     last = df5.iloc[-1]
                     atr  = last["atr"]
 
-                    if breakout_long(df5):
+                    if breakout_long(df5, df15):
                         if allow(symbol, "LONG"):
                             send_signal(symbol, "LONG", last["close"], atr)
 
-                    if breakout_short(df5):
+                    if breakout_short(df5, df15):
                         if allow(symbol, "SHORT"):
                             send_signal(symbol, "SHORT", last["close"], atr)
 
