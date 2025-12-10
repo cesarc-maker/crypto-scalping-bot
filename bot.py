@@ -6,17 +6,20 @@ import numpy as np
 import threading
 from flask import Flask
 import requests
+from datetime import datetime, timezone
 
 # ======================================================
 # CONFIG
 # ======================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-PORT = int(os.getenv("PORT", 10000))
+CHAT_ID   = os.getenv("CHAT_ID")
+PORT      = int(os.getenv("PORT", 10000))
 
-SCAN_INTERVAL = 30        # faster than old bot
-PAIR_LIMIT = 60           # more pairs = more signals
+SCAN_INTERVAL = 20           # fast scalping interval
+PAIR_LIMIT    = 80           # scan more symbols, movers filter will shrink it
+
+TOP_MOVER_COUNT = 20         # option B
 
 EXCHANGES = [
     "binance",
@@ -25,6 +28,9 @@ EXCHANGES = [
     "bybit",
     "okx"
 ]
+
+recent_signals = {}
+WINDOW = 1800  # 30 min duplicate prevention
 
 # ======================================================
 # TELEGRAM
@@ -39,53 +45,30 @@ def send_telegram(text):
     except:
         pass
 
-# ======================================================
-# STARTUP MESSAGE
-# ======================================================
-
 def startup():
-    send_telegram(
-        "🚀 HIGH-RETURN BREAKOUT BOT RUNNING\n"
-        "Aggressive filtering enabled.\n"
-        "More signals. Higher R. Faster detection.\n"
-        "Multi-exchange scanning active."
-    )
+    send_telegram("🚀 QUICK-SCALP BREAKOUT BOT RUNNING\nTop movers + controlled aggressive mode active.")
 
 # ======================================================
 # DUPLICATE PROTECTION
 # ======================================================
 
-recent = {}
-WINDOW = 3600   # 1 hour
-
-def allow(symbol, key):
+def allow(symbol, direction, price):
     now = time.time()
+    key = f"{symbol}_{direction}"
 
-    if symbol not in recent:
-        recent[symbol] = {}
+    if symbol not in recent_signals:
+        recent_signals[symbol] = {}
 
-    if key not in recent[symbol]:
-        recent[symbol][key] = now
+    if key not in recent_signals[symbol]:
+        recent_signals[symbol][key] = now
         return True
 
-    if now - recent[symbol][key] > WINDOW:
-        recent[symbol][key] = now
+    last_time = recent_signals[symbol][key]
+    if now - last_time > WINDOW:
+        recent_signals[symbol][key] = now
         return True
 
     return False
-
-# ======================================================
-# INDICATORS
-# ======================================================
-
-def add_indicators(df):
-    df["ema20"] = df["close"].ewm(span=20).mean()
-    df["ema50"] = df["close"].ewm(span=50).mean()
-    df["ema200"] = df["close"].ewm(span=200).mean()
-    df["vol_sma"] = df["volume"].rolling(20).mean()
-    df["atr"] = (df["high"] - df["low"]).rolling(14).mean()
-    df["range"] = df["high"] - df["low"]
-    return df
 
 # ======================================================
 # EXCHANGE HELPERS
@@ -94,9 +77,9 @@ def add_indicators(df):
 def get_ex(name):
     try:
         if name == "binance_futures":
-            return ccxt.binance({"options": {"defaultType": "future"}})
+            return ccxt.binance({"options":{"defaultType":"future"}})
         if name == "bybit":
-            return ccxt.bybit({"options": {"defaultType": "linear"}})
+            return ccxt.bybit({"options":{"defaultType":"linear"}})
         return getattr(ccxt, name)()
     except:
         return None
@@ -108,68 +91,115 @@ def get_pairs(ex):
     except:
         return []
 
+# ======================================================
+# INDICATORS
+# ======================================================
+
+def add_indicators(df):
+    df["ema9"]  = df["close"].ewm(span=9).mean()
+    df["ema20"] = df["close"].ewm(span=20).mean()
+    df["vol_sma"] = df["volume"].rolling(20).mean()
+    df["atr"] = (df["high"] - df["low"]).rolling(14).mean()
+    df["range"] = df["high"] - df["low"]
+    return df
+
 def get_df(ex, symbol, tf):
     try:
-        data = ex.fetch_ohlcv(symbol, tf, limit=150)
+        data = ex.fetch_ohlcv(symbol, tf, limit=120)
         df = pd.DataFrame(data, columns=["ts","open","high","low","close","volume"])
         return add_indicators(df)
     except:
         return None
 
 # ======================================================
-# HIGH-RETURN BREAKOUT LOGIC
+# TOP MOVER DETECTION (Hybrid)
 # ======================================================
 
-def breakout_long(df5, df15):
+def detect_top_movers(ex):
+    movers = []
 
+    pairs = get_pairs(ex)
+    for s in pairs:
+        df = get_df(ex, s, "15m")
+        if df is None or len(df) < 20:
+            continue
+
+        # price momentum
+        pct_change = (df["close"].iloc[-1] - df["close"].iloc[-4]) / df["close"].iloc[-4] * 100
+
+        # volume momentum
+        vol_ratio = df["volume"].iloc[-1] / (df["vol_sma"].iloc[-1] + 1e-10)
+
+        score = pct_change * 0.6 + vol_ratio * 0.4
+        movers.append((s, score))
+
+    # sort descending by score
+    movers_sorted = sorted(movers, key=lambda x: x[1], reverse=True)
+
+    # return only top N movers
+    return [m[0] for m in movers_sorted[:TOP_MOVER_COUNT]]
+
+# ======================================================
+# SCALPING BREAKOUT LOGIC (Controlled Aggressive)
+# ======================================================
+
+def breakout_long(df5):
     last = df5.iloc[-1]
     p1   = df5.iloc[-2]
     p2   = df5.iloc[-3]
-    p3   = df5.iloc[-4]
 
-    # Trend bias
-    if not (df5["ema20"].iloc[-1] > df5["ema50"].iloc[-1]): return False
-    if not (df15["ema20"].iloc[-1] > df15["ema50"].iloc[-1]): return False
+    # Trend alignment — tight scalper trend
+    if not (last["ema9"] > last["ema20"]):
+        return False
 
-    # ATR explosion (aggressive)
-    if not (last["atr"] >= p1["atr"] * 1.18): return False
+    # Volatility confirmation
+    if not (last["atr"] > p1["atr"] * 1.12):
+        return False
 
-    # Volume expansion
-    if not (last["volume"] > last["vol_sma"] * 1.5): return False
+    # Volume confirmation
+    if not (last["volume"] > last["vol_sma"] * 1.4):
+        return False
 
-    # Level
-    breakout = max(p1["high"], p2["high"], p3["high"])
+    # Breakout level
+    breakout = max(p1["high"], p2["high"])
 
-    # Early breakout capture
-    if not (last["close"] > breakout * 1.001): return False
+    # light sensitivity — scalper logic
+    if not (last["close"] > breakout * 1.0008):
+        return False
 
-    # Candle power (looser)
+    # ignition candle
     body = last["close"] - last["open"]
-    if body <= 0: return False
-    if body < 0.55 * last["range"]: return False
+    if body <= 0:
+        return False
+    if body < 0.52 * last["range"]:
+        return False
 
     return True
 
-def breakout_short(df5, df15):
-
+def breakout_short(df5):
     last = df5.iloc[-1]
     p1   = df5.iloc[-2]
     p2   = df5.iloc[-3]
-    p3   = df5.iloc[-4]
 
-    if not (df5["ema20"].iloc[-1] < df5["ema50"].iloc[-1]): return False
-    if not (df15["ema20"].iloc[-1] < df15["ema50"].iloc[-1]): return False
+    if not (last["ema9"] < last["ema20"]):
+        return False
 
-    if not (last["atr"] >= p1["atr"] * 1.18): return False
-    if not (last["volume"] > last["vol_sma"] * 1.5): return False
+    if not (last["atr"] > p1["atr"] * 1.12):
+        return False
 
-    breakdown = min(p1["low"], p2["low"], p3["low"])
+    if not (last["volume"] > last["vol_sma"] * 1.4):
+        return False
 
-    if not (last["close"] < breakdown * 0.999): return False
+    breakdown = min(p1["low"], p2["low"])
+
+    if not (last["close"] < breakdown * 0.9992):
+        return False
 
     body = last["open"] - last["close"]
-    if body <= 0: return False
-    if body < 0.55 * last["range"]: return False
+    if body <= 0:
+        return False
+    if body < 0.52 * last["range"]:
+        return False
 
     return True
 
@@ -177,33 +207,38 @@ def breakout_short(df5, df15):
 # SEND SIGNAL
 # ======================================================
 
-def send_signal(symbol, side, price, atr):
+def send_signal(symbol, direction, price, atr):
 
-    # Higher-return TP system
-    if side == "LONG":
-        sl  = price - 2 * atr
-        tp1 = price + 2 * atr
-        tp2 = price + 4 * atr
-        tp3 = price + 7 * atr
-        tp4 = price +12 * atr
+    # ATR-based stops & targets
+    if direction == "LONG":
+        sl  = price - 1.6 * atr
+        tp1 = price + 1.2 * atr
+        tp2 = price + 2.0 * atr
+        tp3 = price + 3.5 * atr
     else:
-        sl  = price + 2 * atr
-        tp1 = price - 2 * atr
-        tp2 = price - 4 * atr
-        tp3 = price - 7 * atr
-        tp4 = price -12 * atr
+        sl  = price + 1.6 * atr
+        tp1 = price - 1.2 * atr
+        tp2 = price - 2.0 * atr
+        tp3 = price - 3.5 * atr
+
+    # leverage suggestion (non-advice)
+    lv = (
+        "10–20x" if ("BTC" in symbol or "ETH" in symbol)
+        else "8–15x" if ("SOL" in symbol or "AVAX" in symbol or "BNB" in symbol or "LINK" in symbol)
+        else "5–10x"
+    )
 
     msg = (
-        f"🔥 HIGH-RETURN {side} BREAKOUT\n\n"
+        f"🔥 QUICK-SCALP {direction}\n\n"
         f"Pair: {symbol}\n"
-        f"Entry: {price}\n"
-        f"ATR: {round(atr,4)}\n\n"
-        f"SL:  {round(sl,4)}\n"
-        f"TP1: {round(tp1,4)}\n"
-        f"TP2: {round(tp2,4)}\n"
-        f"TP3: {round(tp3,4)}\n"
-        f"TP4: {round(tp4,4)}\n\n"
-        "⚡ Aggressive breakout mode enabled."
+        f"Entry: {round(price,6)}\n"
+        f"ATR: {round(atr,6)}\n\n"
+        f"SL:  {round(sl,6)}\n"
+        f"TP1: {round(tp1,6)}\n"
+        f"TP2: {round(tp2,6)}\n"
+        f"TP3: {round(tp3,6)}\n\n"
+        f"Suggested Leverage: {lv}\n"
+        f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
     )
 
     send_telegram(msg)
@@ -212,39 +247,39 @@ def send_signal(symbol, side, price, atr):
 # MAIN SCANNER LOOP
 # ======================================================
 
-def scanner():
+def scanner_loop():
 
     startup()
 
     while True:
+
         for ex_name in EXCHANGES:
 
             ex = get_ex(ex_name)
-            if ex is None: 
+            if not ex:
                 continue
 
-            for symbol in get_pairs(ex):
+            # get top movers
+            movers = detect_top_movers(ex)
+
+            for symbol in movers:
 
                 try:
-                    df5  = get_df(ex, symbol, "5m")
-                    df15 = get_df(ex, symbol, "15m")
-
-                    if df5 is None or df15 is None:
+                    df5 = get_df(ex, symbol, "5m")
+                    if df5 is None or len(df5) < 20:
                         continue
 
                     last = df5.iloc[-1]
-                    atr  = last["atr"]
+                    atr = last["atr"]
 
-                    # 🔥 HIGH-RETURN LONG
-                    if breakout_long(df5, df15):
-                        key = f"LONG_{symbol}_{last['close']}"
-                        if allow(symbol, key):
+                    # LONG
+                    if breakout_long(df5):
+                        if allow(symbol, "LONG", last["close"]):
                             send_signal(symbol, "LONG", last["close"], atr)
 
-                    # 🔥 HIGH-RETURN SHORT
-                    if breakout_short(df5, df15):
-                        key = f"SHORT_{symbol}_{last['close']}"
-                        if allow(symbol, key):
+                    # SHORT
+                    if breakout_short(df5):
+                        if allow(symbol, "SHORT", last["close"]):
                             send_signal(symbol, "SHORT", last["close"], atr)
 
                 except:
@@ -253,15 +288,15 @@ def scanner():
         time.sleep(SCAN_INTERVAL)
 
 # ======================================================
-# FLASK SERVER — REQUIRED BY RENDER
+# FLASK SERVER (Render requirement)
 # ======================================================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "HIGH-RETURN BREAKOUT BOT RUNNING"
+    return "QUICK-SCALP BREAKOUT BOT RUNNING"
 
 if __name__ == "__main__":
-    threading.Thread(target=scanner, daemon=True).start()
+    threading.Thread(target=scanner_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
