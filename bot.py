@@ -46,8 +46,8 @@ def send_telegram(text):
 
 def startup():
     send_telegram(
-        "🚀 EXPLOSIVE RR SCALP BOT RUNNING\n"
-        "5m + 15m Trend Alignment + ATR Regime + Volume Expansion."
+        "🚀 ADVANCED S&D SCALP BOT ACTIVE\n"
+        "5m + 15m Trend Alignment + ATR Regime + Volume Expansion + S&D Filtering."
     )
 
 # ======================================================
@@ -81,6 +81,7 @@ def add_indicators(df):
     df["ema50"] = df["close"].ewm(span=50).mean()
 
     df["vol_sma"] = df["volume"].rolling(20).mean()
+
     df["atr_raw"] = (df["high"] - df["low"])
     df["atr"] = df["atr_raw"].rolling(14).mean()
     df["atr_sma"] = df["atr"].rolling(14).mean()
@@ -118,7 +119,7 @@ def get_pairs(ex):
         return []
 
 # ======================================================
-# HYBRID TOP MOVERS
+# TOP MOVERS (same as before)
 # ======================================================
 
 def detect_top_movers(ex):
@@ -140,7 +141,7 @@ def detect_top_movers(ex):
     return [m[0] for m in movers_sorted[:TOP_MOVER_COUNT]]
 
 # ======================================================
-# TREND ALIGNMENT (5m + 15m)
+# TREND ALIGNMENT (same as before)
 # ======================================================
 
 def trend_long(df5, df15):
@@ -156,7 +157,7 @@ def trend_short(df5, df15):
     )
 
 # ======================================================
-# VOLATILITY + VOLUME FILTERS
+# ATR + VOLUME FILTERS (same as before)
 # ======================================================
 
 def volatility_ok(df):
@@ -178,25 +179,127 @@ def volume_ok(df):
     )
 
 # ======================================================
-# BREAKOUT LOGIC (EXPLOSIVE RR MODE)
+# SWING STRUCTURE (most recent swing high/low)
+# ======================================================
+
+def find_recent_swing_high(df):
+    for i in range(len(df)-3, 2, -1):
+        if df["high"].iloc[i] > df["high"].iloc[i-1] and df["high"].iloc[i] > df["high"].iloc[i+1]:
+            return df["high"].iloc[i]
+    return None
+
+def find_recent_swing_low(df):
+    for i in range(len(df)-3, 2, -1):
+        if df["low"].iloc[i] < df["low"].iloc[i-1] and df["low"].iloc[i] < df["low"].iloc[i+1]:
+            return df["low"].iloc[i]
+    return None
+
+# ======================================================
+# SUPPLY & DEMAND ZONE DETECTOR (wick-range institutional)
+# ======================================================
+
+def find_sd_zones(df):
+    zones = []
+
+    for i in range(3, len(df)-3):
+        base = df.iloc[i]
+        prev = df.iloc[i-1]
+        nxt  = df.iloc[i+1]
+
+        # Demand: base candle + strong up displacement
+        if base["close"] > base["open"] and nxt["close"] > nxt["open"] and (nxt["close"] - nxt["open"]) > base["range"] * 1.2:
+            low = base["low"]
+            high = prev["high"]
+            zones.append(("demand", low, high))
+
+        # Supply: base candle + strong down displacement
+        if base["close"] < base["open"] and nxt["close"] < nxt["open"] and (base["open"] - base["close"]) > prev["range"] * 1.2:
+            high = base["high"]
+            low  = prev["low"]
+            zones.append(("supply", high, low))
+
+    return zones[-2:]  # keep only 2 most recent zones
+
+# ======================================================
+# CHECK IF PRICE IS INSIDE SUPPLY/DEMAND
+# ======================================================
+
+def in_supply(price, zones):
+    for z in zones:
+        if z[0] == "supply":
+            high = z[1]
+            low = z[2]
+            if low <= price <= high:
+                return True
+    return False
+
+def in_demand(price, zones):
+    for z in zones:
+        if z[0] == "demand":
+            low = z[1]
+            high = z[2]
+            if low <= price <= high:
+                return True
+    return False
+
+# ======================================================
+# STRICT 0.05% BUFFER RULE
+# ======================================================
+
+def near_supply(price, zones):
+    for z in zones:
+        if z[0] == "supply":
+            low = z[2]
+            if abs(price - low) / price < 0.0005:
+                return True
+    return False
+
+def near_demand(price, zones):
+    for z in zones:
+        if z[0] == "demand":
+            high = z[2]
+            if abs(price - high) / price < 0.0005:
+                return True
+    return False
+
+# ======================================================
+# BREAKOUT LOGIC (now includes S&D + structure)
 # ======================================================
 
 def breakout_long(df5, df15):
+
     last = df5.iloc[-1]
     p1 = df5.iloc[-2]
     p2 = df5.iloc[-3]
+    price = last["close"]
 
+    # Trend
     if not trend_long(df5, df15):
         return False
 
+    # Volatility + Volume
     if not volatility_ok(df5):
         return False
-
     if not volume_ok(df5):
         return False
 
-    breakout = max(p1["high"], p2["high"])
+    # Recent swing high must be broken
+    swing_high = find_recent_swing_high(df5)
+    if swing_high is None or price <= swing_high * 1.0004:
+        return False
 
+    # S&D zones
+    sd5 = find_sd_zones(df5)
+    sd15 = find_sd_zones(df15)
+
+    if in_supply(price, sd5) or in_supply(price, sd15):
+        return False
+
+    if near_supply(price, sd5) or near_supply(price, sd15):
+        return False
+
+    # Original breakout logic
+    breakout = max(p1["high"], p2["high"])
     if not (last["close"] > breakout * 1.0004):
         return False
 
@@ -206,22 +309,41 @@ def breakout_long(df5, df15):
 
     return True
 
+
 def breakout_short(df5, df15):
+
     last = df5.iloc[-1]
     p1 = df5.iloc[-2]
     p2 = df5.iloc[-3]
+    price = last["close"]
 
+    # Trend
     if not trend_short(df5, df15):
         return False
 
+    # Volatility + Volume
     if not volatility_ok(df5):
         return False
-
     if not volume_ok(df5):
         return False
 
-    breakdown = min(p1["low"], p2["low"])
+    # Recent swing low must be broken
+    swing_low = find_recent_swing_low(df5)
+    if swing_low is None or price >= swing_low * 0.9996:
+        return False
 
+    # S&D zones
+    sd5 = find_sd_zones(df5)
+    sd15 = find_sd_zones(df15)
+
+    if in_demand(price, sd5) or in_demand(price, sd15):
+        return False
+
+    if near_demand(price, sd5) or near_demand(price, sd15):
+        return False
+
+    # Original breakout logic
+    breakdown = min(p1["low"], p2["low"])
     if not (last["close"] < breakdown * 0.9996):
         return False
 
@@ -232,7 +354,7 @@ def breakout_short(df5, df15):
     return True
 
 # ======================================================
-# SIGNAL MESSAGE
+# SIGNAL MESSAGE (unchanged)
 # ======================================================
 
 def send_signal(symbol, direction, price, atr):
@@ -340,7 +462,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "EXPLOSIVE RR SCALP BOT RUNNING"
+    return "ADVANCED S&D SCALP BOT RUNNING"
 
 if __name__ == "__main__":
     threading.Thread(target=scanner_loop, daemon=True).start()
