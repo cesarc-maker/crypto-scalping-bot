@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # ======================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID   = os.getenv("CHAT_ID")
+CHAT_IDS  = os.getenv("CHAT_IDS", "")  # << UPDATED
 PORT      = int(os.getenv("PORT", 10000))
 
 SCAN_INTERVAL = 20
@@ -32,17 +32,19 @@ recent_signals = {}
 WINDOW = 1800  # 30-minute duplicate protection
 
 # ======================================================
-# TELEGRAM
+# TELEGRAM (UPDATED FOR MULTI-CHAT)
 # ======================================================
 
 def send_telegram(text):
     try:
-        requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-            f"?chat_id={CHAT_ID}&text={text}"
-        )
-    except:
-        pass
+        chat_list = [cid.strip() for cid in CHAT_IDS.split(",") if cid.strip()]
+        for cid in chat_list:
+            requests.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+                f"?chat_id={cid}&text={text}"
+            )
+    except Exception as e:
+        print("Telegram error:", e)
 
 def startup():
     send_telegram(
@@ -119,7 +121,7 @@ def get_pairs(ex):
         return []
 
 # ======================================================
-# TOP MOVERS (same as before)
+# TOP MOVERS
 # ======================================================
 
 def detect_top_movers(ex):
@@ -141,7 +143,7 @@ def detect_top_movers(ex):
     return [m[0] for m in movers_sorted[:TOP_MOVER_COUNT]]
 
 # ======================================================
-# TREND ALIGNMENT (same as before)
+# TREND ALIGNMENT
 # ======================================================
 
 def trend_long(df5, df15):
@@ -157,29 +159,21 @@ def trend_short(df5, df15):
     )
 
 # ======================================================
-# ATR + VOLUME FILTERS (same as before)
+# ATR + VOLUME FILTERS
 # ======================================================
 
 def volatility_ok(df):
     last = df.iloc[-1]
     prev = df.iloc[-2]
-
-    return (
-        last["atr"] > last["atr_sma"] and
-        last["atr"] > prev["atr"] * 1.02
-    )
+    return last["atr"] > last["atr_sma"] and last["atr"] > prev["atr"] * 1.02
 
 def volume_ok(df):
     last = df.iloc[-1]
     prev = df.iloc[-2]
-
-    return (
-        last["volume"] > last["vol_sma"] * 1.7 and
-        last["volume"] > prev["volume"]
-    )
+    return last["volume"] > last["vol_sma"] * 1.7 and last["volume"] > prev["volume"]
 
 # ======================================================
-# SWING STRUCTURE (most recent swing high/low)
+# SWINGS
 # ======================================================
 
 def find_recent_swing_high(df):
@@ -195,166 +189,120 @@ def find_recent_swing_low(df):
     return None
 
 # ======================================================
-# SUPPLY & DEMAND ZONE DETECTOR (wick-range institutional)
+# S&D
 # ======================================================
 
 def find_sd_zones(df):
     zones = []
-
     for i in range(3, len(df)-3):
         base = df.iloc[i]
         prev = df.iloc[i-1]
         nxt  = df.iloc[i+1]
 
-        # Demand: base candle + strong up displacement
+        # Demand
         if base["close"] > base["open"] and nxt["close"] > nxt["open"] and (nxt["close"] - nxt["open"]) > base["range"] * 1.2:
-            low = base["low"]
-            high = prev["high"]
-            zones.append(("demand", low, high))
+            zones.append(("demand", base["low"], prev["high"]))
 
-        # Supply: base candle + strong down displacement
+        # Supply
         if base["close"] < base["open"] and nxt["close"] < nxt["open"] and (base["open"] - base["close"]) > prev["range"] * 1.2:
-            high = base["high"]
-            low  = prev["low"]
-            zones.append(("supply", high, low))
+            zones.append(("supply", base["high"], prev["low"]))
 
-    return zones[-2:]  # keep only 2 most recent zones
-
-# ======================================================
-# CHECK IF PRICE IS INSIDE SUPPLY/DEMAND
-# ======================================================
+    return zones[-2:]
 
 def in_supply(price, zones):
     for z in zones:
         if z[0] == "supply":
-            high = z[1]
-            low = z[2]
-            if low <= price <= high:
+            if z[2] <= price <= z[1]:
                 return True
     return False
 
 def in_demand(price, zones):
     for z in zones:
         if z[0] == "demand":
-            low = z[1]
-            high = z[2]
-            if low <= price <= high:
+            if z[1] <= price <= z[2]:
                 return True
     return False
-
-# ======================================================
-# STRICT 0.05% BUFFER RULE
-# ======================================================
 
 def near_supply(price, zones):
     for z in zones:
         if z[0] == "supply":
-            low = z[2]
-            if abs(price - low) / price < 0.0005:
+            if abs(price - z[2]) / price < 0.0005:
                 return True
     return False
 
 def near_demand(price, zones):
     for z in zones:
         if z[0] == "demand":
-            high = z[2]
-            if abs(price - high) / price < 0.0005:
+            if abs(price - z[2]) / price < 0.0005:
                 return True
     return False
 
 # ======================================================
-# BREAKOUT LOGIC (now includes S&D + structure)
+# BREAKOUT LOGIC
 # ======================================================
 
 def breakout_long(df5, df15):
-
     last = df5.iloc[-1]
+    price = last["close"]
     p1 = df5.iloc[-2]
     p2 = df5.iloc[-3]
-    price = last["close"]
 
-    # Trend
     if not trend_long(df5, df15):
         return False
-
-    # Volatility + Volume
-    if not volatility_ok(df5):
-        return False
-    if not volume_ok(df5):
+    if not volatility_ok(df5) or not volume_ok(df5):
         return False
 
-    # Recent swing high must be broken
     swing_high = find_recent_swing_high(df5)
     if swing_high is None or price <= swing_high * 1.0004:
         return False
 
-    # S&D zones
     sd5 = find_sd_zones(df5)
     sd15 = find_sd_zones(df15)
 
     if in_supply(price, sd5) or in_supply(price, sd15):
         return False
-
     if near_supply(price, sd5) or near_supply(price, sd15):
         return False
 
-    # Original breakout logic
     breakout = max(p1["high"], p2["high"])
-    if not (last["close"] > breakout * 1.0004):
+    if not (price > breakout * 1.0004):
         return False
 
     body = last["close"] - last["open"]
-    if body <= 0 or body < 0.50 * last["range"]:
-        return False
-
-    return True
-
+    return body > 0 and body >= 0.50 * last["range"]
 
 def breakout_short(df5, df15):
-
     last = df5.iloc[-1]
+    price = last["close"]
     p1 = df5.iloc[-2]
     p2 = df5.iloc[-3]
-    price = last["close"]
 
-    # Trend
     if not trend_short(df5, df15):
         return False
-
-    # Volatility + Volume
-    if not volatility_ok(df5):
-        return False
-    if not volume_ok(df5):
+    if not volatility_ok(df5) or not volume_ok(df5):
         return False
 
-    # Recent swing low must be broken
     swing_low = find_recent_swing_low(df5)
     if swing_low is None or price >= swing_low * 0.9996:
         return False
 
-    # S&D zones
     sd5 = find_sd_zones(df5)
     sd15 = find_sd_zones(df15)
 
     if in_demand(price, sd5) or in_demand(price, sd15):
         return False
-
     if near_demand(price, sd5) or near_demand(price, sd15):
         return False
 
-    # Original breakout logic
     breakdown = min(p1["low"], p2["low"])
-    if not (last["close"] < breakdown * 0.9996):
+    if not (price < breakdown * 0.9996):
         return False
 
     body = last["open"] - last["close"]
-    if body <= 0 or body < 0.50 * last["range"]:
-        return False
-
-    return True
+    return body > 0 and body >= 0.50 * last["range"]
 
 # ======================================================
-# SIGNAL MESSAGE (unchanged)
+# SIGNAL MESSAGE
 # ======================================================
 
 def send_signal(symbol, direction, price, atr):
@@ -398,17 +346,7 @@ def send_signal(symbol, direction, price, atr):
         f"TP3: {round(tp3,6)}\n"
         f"TP4: {round(tp4,6)}\n\n"
         f"Suggested Leverage Tier: {lv}\n"
-        f"Time: {ts}\n\n"
-        f"📈 Challenge Framework (General Example Only)\n"
-        f"- Example Starting Account: $100\n"
-        f"- Example Risk Tier (1%): ${risk_amount:.2f}\n"
-        f"- Stop Distance: {stop_distance*100:.2f}%\n"
-        f"- Example Formula:\n"
-        f"    size = risk_amount / stop_distance\n"
-        f"    size ≈ ${example_size:.2f}\n\n"
-        f"🧠 General Mindset Note:\n"
-        f"Strong trend alignment + rising volatility can create cleaner setups.\n"
-        f"This is technical information only — not financial advice."
+        f"Time: {ts}\n"
     )
 
     send_telegram(msg)
