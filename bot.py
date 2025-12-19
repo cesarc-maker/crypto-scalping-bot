@@ -1,6 +1,6 @@
 # ======================================================
-# ADVANCED S&D SCALPING BOT — 70% MODE
-# FULL SELF-CONTAINED VERSION (NO MISSING FUNCTIONS)
+# ADVANCED S&D SCALPING BOT — 70% MODE (HIGH RETURN)
+# LIMIT-ONLY • HIGH ACCURACY • RUNNER ENABLED
 # ======================================================
 
 import os
@@ -21,7 +21,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-log = logging.getLogger("SDBOT_70")
+log = logging.getLogger("SDBOT_70_PLUS")
 
 # ======================================================
 # CONFIG
@@ -34,10 +34,8 @@ CHAT_ID2 = os.getenv("CHAT_ID2", "").strip()
 RAW_CHAT_IDS = os.getenv("CHAT_IDS", "")
 
 CHAT_IDS = set()
-if CHAT_ID1:
-    CHAT_IDS.add(CHAT_ID1)
-if CHAT_ID2:
-    CHAT_IDS.add(CHAT_ID2)
+if CHAT_ID1: CHAT_IDS.add(CHAT_ID1)
+if CHAT_ID2: CHAT_IDS.add(CHAT_ID2)
 if RAW_CHAT_IDS:
     for cid in RAW_CHAT_IDS.split(","):
         if cid.strip():
@@ -71,14 +69,14 @@ def send_telegram(text: str):
 
 def send_startup():
     msg = (
-        "🚀 ADVANCED S&D BOT — 70% MODE ACTIVE\n\n"
+        "🚀 ADVANCED S&D BOT — *70% MODE + HIGH RETURN*\n\n"
         "Mode: LIMIT ONLY\n"
-        "Bias: STRONG HTF ONLY\n"
-        "Displacement: ATR ≥ 2.0× | Volume ≥ 2.0×\n"
+        "Entries: Strong Displacement + Structure\n"
+        "Exits: Partial + Runner Logic\n"
         "Risk: LOW / MEDIUM ONLY\n\n"
         f"Exchanges: {', '.join(EXCHANGES)}\n"
         f"Scan Interval: {SCAN_INTERVAL}s\n\n"
-        "High-accuracy institutional continuation scanner running ⚡"
+        "Institutional continuation engine online ⚡"
     )
     send_telegram(msg)
     log.info("Startup message sent")
@@ -103,7 +101,7 @@ def allow(symbol, direction):
 # ======================================================
 
 def add_indicators(df):
-    df["ema9"] = df["close"].ewm(span=9).mean()
+    df["ema9"]  = df["close"].ewm(span=9).mean()
     df["ema20"] = df["close"].ewm(span=20).mean()
     df["ema50"] = df["close"].ewm(span=50).mean()
 
@@ -162,7 +160,7 @@ def detect_top_movers(ex):
     return [m[0] for m in movers[:TOP_MOVER_COUNT]]
 
 # ======================================================
-# CORE STRATEGY — FULL BREAKOUT LOGIC (NO PLACEHOLDERS)
+# CORE STRATEGY (UNCHANGED STRUCTURE)
 # ======================================================
 
 def trend_long(df5, df15):
@@ -202,48 +200,37 @@ def find_recent_swing_low(df):
 def breakout_long(df5, df15):
     last = df5.iloc[-1]
     price = last["close"]
-
     if not trend_long(df5, df15):
         return False
     if not volatility_ok(df5) or not volume_ok(df5):
         return False
-
     swing_high = find_recent_swing_high(df5)
     if swing_high is None or price <= swing_high * 1.0005:
         return False
-
-    body = last["close"] - last["open"]
-    return body > 0 and body >= 0.55 * last["range"]
+    return (last["close"] - last["open"]) >= 0.55 * last["range"]
 
 def breakout_short(df5, df15):
     last = df5.iloc[-1]
     price = last["close"]
-
     if not trend_short(df5, df15):
         return False
     if not volatility_ok(df5) or not volume_ok(df5):
         return False
-
     swing_low = find_recent_swing_low(df5)
     if swing_low is None or price >= swing_low * 0.9995:
         return False
-
-    body = last["open"] - last["close"]
-    return body > 0 and body >= 0.55 * last["range"]
+    return (last["open"] - last["close"]) >= 0.55 * last["range"]
 
 # ======================================================
-# 70% MODE DISPLACEMENT FILTER
+# 70% MODE FILTER
 # ======================================================
 
 def strong_displacement(df):
     last = df.iloc[-1]
-    return (
-        last["atr"] >= last["atr_sma"] * 2.0 and
-        last["volume"] >= last["vol_sma"] * 2.0
-    )
+    return last["atr"] >= last["atr_sma"] * 2.0 and last["volume"] >= last["vol_sma"] * 2.0
 
 # ======================================================
-# SIGNAL BUILDER (LIMIT ONLY)
+# SIGNAL BUILDER (HIGH RETURN)
 # ======================================================
 
 def send_signal(symbol, direction, price, atr):
@@ -253,8 +240,12 @@ def send_signal(symbol, direction, price, atr):
     if stop_pct < 0.35 or stop_pct > 0.90:
         return
 
+    # Core targets
     tp1 = price + 1.5 * atr if direction == "LONG" else price - 1.5 * atr
-    tp2 = price + 2.5 * atr if direction == "LONG" else price - 2.5 * atr
+    tp2 = price + 3.0 * atr if direction == "LONG" else price - 3.0 * atr
+
+    # Runner logic
+    runner = price + 4.5 * atr if direction == "LONG" else price - 4.5 * atr
 
     leverage = 60 if stop_pct < 0.6 else 30
     risk = "LOW" if leverage >= 50 else "MEDIUM"
@@ -266,8 +257,9 @@ def send_signal(symbol, direction, price, atr):
         f"Pair: {symbol}\n"
         f"Entry: {round(price,6)}\n"
         f"Stop: {round(sl,6)}\n\n"
-        f"TP1: {round(tp1,6)} (50%)\n"
-        f"TP2: {round(tp2,6)}\n\n"
+        f"TP1: {round(tp1,6)} (40%)\n"
+        f"TP2: {round(tp2,6)} (40%)\n"
+        f"Runner: {round(runner,6)} (20%)\n\n"
         f"Leverage: {leverage}x\n"
         f"Risk Level: {risk}\n"
         f"Time: {ts}"
@@ -282,7 +274,7 @@ def send_signal(symbol, direction, price, atr):
 
 def scanner_loop():
     send_startup()
-    log.info("Scanner started (70% MODE)")
+    log.info("Scanner started (70% MODE + HIGH RETURN)")
 
     while True:
         for ex_name in EXCHANGES:
@@ -322,7 +314,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ADVANCED S&D BOT — 70% MODE RUNNING"
+    return "ADVANCED S&D BOT — 70% MODE + HIGH RETURN RUNNING"
 
 if __name__ == "__main__":
     threading.Thread(target=scanner_loop, daemon=True).start()
