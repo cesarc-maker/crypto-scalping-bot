@@ -1,7 +1,6 @@
 # ======================================================
 # ADVANCED S&D SCALPING BOT — 70% MODE
-# HIGH-ACCURACY LIMIT SIGNAL ENGINE
-# STRUCTURE PRESERVED • LOGIC UNCHANGED
+# FULL SELF-CONTAINED VERSION (NO MISSING FUNCTIONS)
 # ======================================================
 
 import os
@@ -35,8 +34,10 @@ CHAT_ID2 = os.getenv("CHAT_ID2", "").strip()
 RAW_CHAT_IDS = os.getenv("CHAT_IDS", "")
 
 CHAT_IDS = set()
-if CHAT_ID1: CHAT_IDS.add(CHAT_ID1)
-if CHAT_ID2: CHAT_IDS.add(CHAT_ID2)
+if CHAT_ID1:
+    CHAT_IDS.add(CHAT_ID1)
+if CHAT_ID2:
+    CHAT_IDS.add(CHAT_ID2)
 if RAW_CHAT_IDS:
     for cid in RAW_CHAT_IDS.split(","):
         if cid.strip():
@@ -70,15 +71,14 @@ def send_telegram(text: str):
 
 def send_startup():
     msg = (
-        "🚀 ADVANCED S&D BOT — *70% MODE ACTIVE*\n\n"
-        "Mode: LIMIT ONLY (High Accuracy)\n"
-        "Bias: Strong HTF Only\n"
+        "🚀 ADVANCED S&D BOT — 70% MODE ACTIVE\n\n"
+        "Mode: LIMIT ONLY\n"
+        "Bias: STRONG HTF ONLY\n"
         "Displacement: ATR ≥ 2.0× | Volume ≥ 2.0×\n"
-        "Entries: Deep Pullback into Value\n"
-        "Risk: LOW / MEDIUM only (HIGH disabled)\n\n"
+        "Risk: LOW / MEDIUM ONLY\n\n"
         f"Exchanges: {', '.join(EXCHANGES)}\n"
         f"Scan Interval: {SCAN_INTERVAL}s\n\n"
-        "Selective institutional continuation engine running ⚡"
+        "High-accuracy institutional continuation scanner running ⚡"
     )
     send_telegram(msg)
     log.info("Startup message sent")
@@ -106,10 +106,13 @@ def add_indicators(df):
     df["ema9"] = df["close"].ewm(span=9).mean()
     df["ema20"] = df["close"].ewm(span=20).mean()
     df["ema50"] = df["close"].ewm(span=50).mean()
+
     df["vol_sma"] = df["volume"].rolling(20).mean()
+
     df["atr_raw"] = df["high"] - df["low"]
     df["atr"] = df["atr_raw"].rolling(14).mean()
     df["atr_sma"] = df["atr"].rolling(14).mean()
+
     df["range"] = df["high"] - df["low"]
     return df
 
@@ -159,20 +162,77 @@ def detect_top_movers(ex):
     return [m[0] for m in movers[:TOP_MOVER_COUNT]]
 
 # ======================================================
-# CORE BREAKOUT / S&D LOGIC (UNCHANGED)
-# ======================================================
-# --- EXACTLY as provided earlier (trend, volatility, swings, S&D, breakout_long/short) ---
-# [SNIPPED HERE FOR BREVITY — but in your actual file this section
-#  should be exactly the breakout block I pasted previously, unchanged]
-#
-# ⚠️ IMPORTANT:
-# DO NOT MODIFY THIS SECTION
+# CORE STRATEGY — FULL BREAKOUT LOGIC (NO PLACEHOLDERS)
 # ======================================================
 
-# (Paste your previously confirmed breakout_long / breakout_short block here)
+def trend_long(df5, df15):
+    return (
+        df5["ema9"].iloc[-1] > df5["ema20"].iloc[-1] > df5["ema50"].iloc[-1] and
+        df15["ema9"].iloc[-1] > df15["ema20"].iloc[-1] > df15["ema50"].iloc[-1]
+    )
+
+def trend_short(df5, df15):
+    return (
+        df5["ema9"].iloc[-1] < df5["ema20"].iloc[-1] < df5["ema50"].iloc[-1] and
+        df15["ema9"].iloc[-1] < df15["ema20"].iloc[-1] < df15["ema50"].iloc[-1]
+    )
+
+def volatility_ok(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    return last["atr"] > last["atr_sma"] and last["atr"] > prev["atr"] * 1.02
+
+def volume_ok(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    return last["volume"] > last["vol_sma"] * 2.0 and last["volume"] > prev["volume"]
+
+def find_recent_swing_high(df):
+    for i in range(len(df)-3, 2, -1):
+        if df["high"].iloc[i] > df["high"].iloc[i-1] and df["high"].iloc[i] > df["high"].iloc[i+1]:
+            return df["high"].iloc[i]
+    return None
+
+def find_recent_swing_low(df):
+    for i in range(len(df)-3, 2, -1):
+        if df["low"].iloc[i] < df["low"].iloc[i-1] and df["low"].iloc[i] < df["low"].iloc[i+1]:
+            return df["low"].iloc[i]
+    return None
+
+def breakout_long(df5, df15):
+    last = df5.iloc[-1]
+    price = last["close"]
+
+    if not trend_long(df5, df15):
+        return False
+    if not volatility_ok(df5) or not volume_ok(df5):
+        return False
+
+    swing_high = find_recent_swing_high(df5)
+    if swing_high is None or price <= swing_high * 1.0005:
+        return False
+
+    body = last["close"] - last["open"]
+    return body > 0 and body >= 0.55 * last["range"]
+
+def breakout_short(df5, df15):
+    last = df5.iloc[-1]
+    price = last["close"]
+
+    if not trend_short(df5, df15):
+        return False
+    if not volatility_ok(df5) or not volume_ok(df5):
+        return False
+
+    swing_low = find_recent_swing_low(df5)
+    if swing_low is None or price >= swing_low * 0.9995:
+        return False
+
+    body = last["open"] - last["close"]
+    return body > 0 and body >= 0.55 * last["range"]
 
 # ======================================================
-# 70% MODE FILTERS
+# 70% MODE DISPLACEMENT FILTER
 # ======================================================
 
 def strong_displacement(df):
@@ -217,7 +277,7 @@ def send_signal(symbol, direction, price, atr):
     log.info(f"Signal sent → {symbol} {direction}")
 
 # ======================================================
-# MAIN SCANNER LOOP
+# MAIN LOOP
 # ======================================================
 
 def scanner_loop():
