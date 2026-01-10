@@ -2,6 +2,9 @@
 # RSI MEAN-REVERSION SCALPING BOT (LOOSER PRO VERSION)
 # INFORMATIONAL ONLY • QUICK SCALPS • MULTI-CHAT TELEGRAM
 # SAME STRUCTURE AS YOUR ORIGINAL BOT (Render-ready)
+#
+# ✅ NOW INCLUDES YOUR PREVIOUS EXCHANGES:
+# Binance (spot), Binance Futures, Bybit, KuCoin, OKX
 # ======================================================
 
 import os
@@ -22,7 +25,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-log = logging.getLogger("RSI_SCALPER_LOOSE")
+log = logging.getLogger("RSI_SCALPER_LOOSE_MULTIEX")
 
 # ======================================================
 # CONFIG
@@ -58,10 +61,10 @@ TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 10))    # seconds
 
 # Universe / performance knobs
 PAIR_LIMIT = int(os.getenv("PAIR_LIMIT", 60))
-WINDOW = int(os.getenv("WINDOW", 600))  # cooldown seconds (looser: 10 min vs 15)
+WINDOW = int(os.getenv("WINDOW", 600))  # cooldown seconds (looser: 10 min)
 
-# Exchanges (kept simple for scalping stability)
-EXCHANGES = os.getenv("EXCHANGES", "binance,bybit").split(",")
+# ✅ Your previous exchange set (same names as your old bot)
+EXCHANGES = ["binance", "binance_futures", "bybit", "kucoin", "okx"]
 
 # Strategy knobs (LOOSER)
 TF_EXEC = os.getenv("TF_EXEC", "1m")
@@ -120,10 +123,11 @@ def send_startup():
         f"EMA: {EMA_PERIOD} | Near EMA allowed: {EMA_NEAR_PCT*100:.2f}%\n"
         f"Wick Filter: <= {int(MAX_WICK_FRAC*100)}% of candle range\n"
         f"Stop/TP (pct): {STOP_PCT*100:.2f}% / {TP_PCT*100:.2f}%\n\n"
-        f"Exchanges: {', '.join([e.strip() for e in EXCHANGES if e.strip()])}\n"
+        f"Exchanges: {', '.join(EXCHANGES)}\n"
         f"Scan Interval: {SCAN_INTERVAL}s | Track Interval: {TRACK_INTERVAL}s\n"
         f"Cooldown: {WINDOW}s\n"
         f"Pairs scanned per exchange: up to {PAIR_LIMIT}\n"
+        f"Chats: {len(CHAT_IDS)}\n"
     )
     send_telegram(msg)
     log.info(f"Startup message sent → chats: {CHAT_IDS}")
@@ -153,7 +157,7 @@ def allow(symbol: str, side: str) -> bool:
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ema"] = df["close"].ewm(span=EMA_PERIOD).mean()
 
-    # RSI(14) classic via SMA of gains/losses (simple + stable)
+    # RSI(14) (SMA method; stable + simple)
     delta = df["close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -175,14 +179,15 @@ def get_df(ex, symbol: str, tf: str):
         return None
 
 # ======================================================
-# EXCHANGES
+# EXCHANGES (same pattern as your old bot)
 # ======================================================
 
 def get_ex(name: str):
     try:
-        name = name.strip()
-        if not name:
-            return None
+        if name == "binance_futures":
+            return ccxt.binance({"options": {"defaultType": "future"}})
+        if name == "bybit":
+            return ccxt.bybit({"options": {"defaultType": "linear"}})
         return getattr(ccxt, name)()
     except Exception as e:
         log.error(f"Exchange load error ({name}): {e}")
@@ -191,7 +196,6 @@ def get_ex(name: str):
 EX_INSTANCES = {}
 
 def get_ex_cached(name: str):
-    name = name.strip()
     if name in EX_INSTANCES and EX_INSTANCES[name]:
         return EX_INSTANCES[name]
     ex = get_ex(name)
@@ -204,12 +208,12 @@ def get_ex_cached(name: str):
 
 def get_pairs(ex):
     """
-    Keeps it simple: Coin/USDT only.
-    (If you want quality filtering like your momentum bot upgrade, we can add it here too.)
+    Simple universe: all USDT pairs up to PAIR_LIMIT.
+    Note: This includes both "BTC/USDT" and any symbol strings that end with "USDT".
     """
     try:
         mk = ex.load_markets()
-        pairs = [s for s in mk if s.endswith("/USDT")]
+        pairs = [s for s in mk if s.endswith("USDT")]
         return pairs[:PAIR_LIMIT]
     except Exception as e:
         log.error(f"Pair load error: {e}")
@@ -419,10 +423,6 @@ def scanner_loop():
 
     while True:
         for ex_name in EXCHANGES:
-            ex_name = ex_name.strip()
-            if not ex_name:
-                continue
-
             ex = get_ex_cached(ex_name)
             if not ex:
                 continue
@@ -437,11 +437,9 @@ def scanner_loop():
                     last = df.iloc[-1]
                     price = float(last["close"])
 
-                    # LONG
                     if long_setup(df) and allow(symbol, "LONG"):
                         send_signal(ex_name, symbol, "LONG", price)
 
-                    # SHORT
                     if short_setup(df) and allow(symbol, "SHORT"):
                         send_signal(ex_name, symbol, "SHORT", price)
 
@@ -458,7 +456,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "RSI SCALPING BOT (LOOSER PRO) RUNNING"
+    return "RSI SCALPING BOT (LOOSER PRO, MULTI-EXCHANGE) RUNNING"
 
 if __name__ == "__main__":
     threading.Thread(target=scanner_loop, daemon=True).start()
