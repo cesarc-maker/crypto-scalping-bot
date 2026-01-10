@@ -1,10 +1,14 @@
 # ======================================================
-# RSI MEAN-REVERSION SCALPING BOT (LOOSER PRO VERSION)
+# RSI MEAN-REVERSION SCALPING BOT (STRICTER PRO VERSION)
 # INFORMATIONAL ONLY • QUICK SCALPS • MULTI-CHAT TELEGRAM
 # SAME STRUCTURE AS YOUR ORIGINAL BOT (Render-ready)
 #
-# ✅ NOW INCLUDES YOUR PREVIOUS EXCHANGES:
-# Binance (spot), Binance Futures, Bybit, KuCoin, OKX
+# ✅ EXCHANGES (ONLY): KuCoin + OKX
+# ✅ STRICTER SETTINGS vs "looser" version:
+#    - RSI levels back closer to classic: 31 / 69
+#    - EMA must be ABOVE/BELOW (no "near EMA" entries)
+#    - Wick filter tighter (50% max wick)
+#    - Cooldown back to 15 minutes
 # ======================================================
 
 import os
@@ -25,7 +29,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-log = logging.getLogger("RSI_SCALPER_LOOSE_MULTIEX")
+log = logging.getLogger("RSI_SCALPER_STRICT_KU_OKX")
 
 # ======================================================
 # CONFIG
@@ -55,40 +59,38 @@ CHAT_IDS = list(CHAT_IDS)
 
 PORT = int(os.getenv("PORT", 10000))
 
-# How often we scan + track
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 10))      # seconds
-TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 10))    # seconds
+# Scan + Track intervals
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 12))      # slightly slower = cleaner signals
+TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 10))
 
 # Universe / performance knobs
 PAIR_LIMIT = int(os.getenv("PAIR_LIMIT", 60))
-WINDOW = int(os.getenv("WINDOW", 600))  # cooldown seconds (looser: 10 min)
+WINDOW = int(os.getenv("WINDOW", 900))  # 15 min cooldown (stricter)
 
-# ✅ Your previous exchange set (same names as your old bot)
-EXCHANGES = ["binance", "binance_futures", "bybit", "kucoin", "okx"]
+# ✅ Only these exchanges
+EXCHANGES = ["kucoin", "okx"]
 
-# Strategy knobs (LOOSER)
+# Strategy knobs (STRICTER)
 TF_EXEC = os.getenv("TF_EXEC", "1m")
 
 RSI_PERIOD = int(os.getenv("RSI_PERIOD", 14))
-RSI_LOW = float(os.getenv("RSI_LOW", 32))     # looser than 30
-RSI_HIGH = float(os.getenv("RSI_HIGH", 68))   # looser than 70
+RSI_LOW = float(os.getenv("RSI_LOW", 31))     # stricter than 32
+RSI_HIGH = float(os.getenv("RSI_HIGH", 69))   # stricter than 68
 
 EMA_PERIOD = int(os.getenv("EMA_PERIOD", 50))
 
-# Allow price to be near EMA (looser)
-EMA_NEAR_PCT = float(os.getenv("EMA_NEAR_PCT", 0.001))  # 0.1%
+# EMA filter strict (no near EMA entries)
+REQUIRE_STRICT_EMA_SIDE = os.getenv("REQUIRE_STRICT_EMA_SIDE", "1") == "1"
 
-# Wick filter (looser)
-MAX_WICK_FRAC = float(os.getenv("MAX_WICK_FRAC", 0.65))  # wick <= 65% of range
+# Wick filter tighter
+MAX_WICK_FRAC = float(os.getenv("MAX_WICK_FRAC", 0.50))  # wick <= 50% of range
 
-# Stop/TP (scalping defaults, percentage-based; informational)
+# Stop/TP (still scalp style, informational)
 STOP_PCT = float(os.getenv("STOP_PCT", 0.003))   # 0.30%
 TP_PCT = float(os.getenv("TP_PCT", 0.006))       # 0.60% (≈ 1:2)
 
-# Recent signal protection
 recent_signals = {}
 
-# Open trades registry (informational)
 open_trades = {}
 open_trades_lock = threading.Lock()
 
@@ -116,11 +118,11 @@ def send_telegram(text: str):
 
 def send_startup():
     msg = (
-        "🚀 RSI MEAN-REVERSION SCALPER (LOOSER PRO)\n\n"
+        "🚀 RSI MEAN-REVERSION SCALPER (STRICTER PRO)\n\n"
         "Mode: Informational only\n"
         f"Timeframe: {TF_EXEC}\n"
         f"RSI: {RSI_PERIOD} | Levels: {RSI_LOW}/{RSI_HIGH}\n"
-        f"EMA: {EMA_PERIOD} | Near EMA allowed: {EMA_NEAR_PCT*100:.2f}%\n"
+        f"EMA: {EMA_PERIOD} | EMA Side Strict: {REQUIRE_STRICT_EMA_SIDE}\n"
         f"Wick Filter: <= {int(MAX_WICK_FRAC*100)}% of candle range\n"
         f"Stop/TP (pct): {STOP_PCT*100:.2f}% / {TP_PCT*100:.2f}%\n\n"
         f"Exchanges: {', '.join(EXCHANGES)}\n"
@@ -157,7 +159,7 @@ def allow(symbol: str, side: str) -> bool:
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ema"] = df["close"].ewm(span=EMA_PERIOD).mean()
 
-    # RSI(14) (SMA method; stable + simple)
+    # RSI(14) via SMA of gains/losses
     delta = df["close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -179,15 +181,11 @@ def get_df(ex, symbol: str, tf: str):
         return None
 
 # ======================================================
-# EXCHANGES (same pattern as your old bot)
+# EXCHANGES
 # ======================================================
 
 def get_ex(name: str):
     try:
-        if name == "binance_futures":
-            return ccxt.binance({"options": {"defaultType": "future"}})
-        if name == "bybit":
-            return ccxt.bybit({"options": {"defaultType": "linear"}})
         return getattr(ccxt, name)()
     except Exception as e:
         log.error(f"Exchange load error ({name}): {e}")
@@ -207,12 +205,9 @@ def get_ex_cached(name: str):
 # ======================================================
 
 def get_pairs(ex):
-    """
-    Simple universe: all USDT pairs up to PAIR_LIMIT.
-    Note: This includes both "BTC/USDT" and any symbol strings that end with "USDT".
-    """
     try:
         mk = ex.load_markets()
+        # keep your original behavior (endswith("USDT"))
         pairs = [s for s in mk if s.endswith("USDT")]
         return pairs[:PAIR_LIMIT]
     except Exception as e:
@@ -220,7 +215,7 @@ def get_pairs(ex):
         return []
 
 # ======================================================
-# RSI SCALPING SETUPS (LOOSER PRO VERSION)
+# RSI SCALPING SETUPS (STRICTER)
 # ======================================================
 
 def long_setup(df: pd.DataFrame) -> bool:
@@ -237,12 +232,11 @@ def long_setup(df: pd.DataFrame) -> bool:
     # Bullish candle
     candle_ok = last["close"] > last["open"]
 
-    # EMA filter: above OR near (looser)
+    # EMA filter strict side
     ema = float(last["ema"])
-    near_ema = abs(float(last["close"]) - ema) / ema <= EMA_NEAR_PCT
-    trend_ok = (last["close"] >= ema) or near_ema
+    trend_ok = (last["close"] >= ema) if REQUIRE_STRICT_EMA_SIDE else True
 
-    # Wick quality: allow some wick, but avoid big rejection
+    # Wick quality tighter
     upper_wick = float(last["high"]) - float(last["close"])
     wick_ok = upper_wick <= MAX_WICK_FRAC * rng
 
@@ -262,12 +256,11 @@ def short_setup(df: pd.DataFrame) -> bool:
     # Bearish candle
     candle_ok = last["close"] < last["open"]
 
-    # EMA filter: below OR near (looser)
+    # EMA filter strict side
     ema = float(last["ema"])
-    near_ema = abs(float(last["close"]) - ema) / ema <= EMA_NEAR_PCT
-    trend_ok = (last["close"] <= ema) or near_ema
+    trend_ok = (last["close"] <= ema) if REQUIRE_STRICT_EMA_SIDE else True
 
-    # Wick quality: allow some wick, but avoid big rejection
+    # Wick quality tighter
     lower_wick = float(last["close"]) - float(last["low"])
     wick_ok = lower_wick <= MAX_WICK_FRAC * rng
 
@@ -278,7 +271,7 @@ def short_setup(df: pd.DataFrame) -> bool:
 # ======================================================
 
 def send_signal(ex_name: str, symbol: str, side: str, entry_price: float):
-    # Simple percentage-based scalp stop/TP (informational)
+    # Percentage-based scalp stop/TP (informational)
     if side == "LONG":
         stop = entry_price * (1.0 - STOP_PCT)
         tp = entry_price * (1.0 + TP_PCT)
@@ -456,7 +449,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "RSI SCALPING BOT (LOOSER PRO, MULTI-EXCHANGE) RUNNING"
+    return "RSI SCALPING BOT (STRICTER PRO • KUCOIN+OKX) RUNNING"
 
 if __name__ == "__main__":
     threading.Thread(target=scanner_loop, daemon=True).start()
