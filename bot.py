@@ -1,9 +1,10 @@
 # ======================================================
 # FUTURES ELITE+ MOMENTUM SIGNAL BOT (INFO ONLY)
 # OKX + KUCOIN FUTURES • TOP MOVERS (ticker-first)
-# 3-TF TREND • DISPLACEMENT • STRUCTURE BREAK
+# 3-TF TREND • BREAKOUT (DONCHIAN) • VOL EXPANSION (ATR+RANGE+VOL) • SQUEEZE FILTER
 # PULLBACK ENTRY MODE (A vs A+) • STOP-PENALTY COOLDOWN
 # R-BASED TPs (CUSTOM RATIOS) • TP/SL TRACKING • POSITION SIZING (INFO)
+# SAME STRUCTURE AS YOUR PREVIOUS BOT (Render-ready)
 # ======================================================
 
 import os
@@ -24,7 +25,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-log = logging.getLogger("FUTURES_ELITE_PLUS_OKX_KUCOIN")
+log = logging.getLogger("FUTURES_ELITE_PLUS_STRAT3")
 
 # ======================================================
 # CONFIG
@@ -32,7 +33,7 @@ log = logging.getLogger("FUTURES_ELITE_PLUS_OKX_KUCOIN")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# Multi-chat
+# Multi-chat (same as your first bot)
 CHAT_ID1 = os.getenv("CHAT_ID", "").strip()
 CHAT_ID2 = os.getenv("CHAT_ID2", "").strip()
 RAW_CHAT_IDS = os.getenv("CHAT_IDS", "")
@@ -58,17 +59,20 @@ TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 15))      # seconds
 # Universe size and mover selection
 PAIR_LIMIT = int(os.getenv("PAIR_LIMIT", 120))
 TOP_MOVER_COUNT = int(os.getenv("TOP_MOVER_COUNT", 12))
-MOVER_CANDIDATE_MULT = int(os.getenv("MOVER_CANDIDATE_MULT", 5))  # ticker shortlist = TOP_MOVER_COUNT * this
+MOVER_CANDIDATE_MULT = int(os.getenv("MOVER_CANDIDATE_MULT", 5))  # shortlist size = TOP_MOVER_COUNT * this
 
-# Regular cooldown per exchange+symbol+direction
+# Regular cooldown per symbol+direction
 WINDOW = int(os.getenv("WINDOW", 1800))  # 30 min default
 
 # Stop-hit penalty cooldown
 STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 7200))  # 2h default
 
-# Exchanges: ONLY OKX + KuCoin Futures
+# Exchanges (ONLY OKX + KuCoin Futures)
 # Override via env: EXCHANGES="okx,kucoin_futures"
-EXCHANGES = os.getenv("EXCHANGES", "okx,kucoin_futures").split(",")
+EXCHANGES = os.getenv(
+    "EXCHANGES",
+    "okx,kucoin_futures"
+).split(",")
 EXCHANGES = [e.strip() for e in EXCHANGES if e.strip()]
 EXCHANGES = [e for e in EXCHANGES if e in ("okx", "kucoin_futures")]  # hard clamp
 
@@ -82,27 +86,36 @@ EMA_FAST = int(os.getenv("EMA_FAST", 9))
 EMA_MID = int(os.getenv("EMA_MID", 20))
 EMA_SLOW = int(os.getenv("EMA_SLOW", 50))
 
-# Displacement thresholds (strict)
-ATR_MULT = float(os.getenv("ATR_MULT", 2.3))      # ATR >= ATR_BASE * ATR_MULT
-VOL_MULT = float(os.getenv("VOL_MULT", 2.5))      # VOL >= VOL_SMA * VOL_MULT
+# ---- Strategy #3: Breakout + Volatility Expansion tuning ----
 
-# ATR lengths (FIXED: baseline longer than ATR length)
+# ATR and baseline (FIX: baseline longer than ATR length)
 ATR_LEN = int(os.getenv("ATR_LEN", 14))
 ATR_BASELINE_LEN = int(os.getenv("ATR_BASELINE_LEN", 50))
 
-# Momentum candle quality
-BODY_PCT = float(os.getenv("BODY_PCT", 0.65))           # body >= BODY_PCT * range
-MAX_WICK_FRAC = float(os.getenv("MAX_WICK_FRAC", 0.30)) # rejection wick cap
+# Expansion gates (true “impulse”)
+ATR_EXP_MULT = float(os.getenv("ATR_EXP_MULT", 1.4))     # ATR >= ATR_BASE * ATR_EXP_MULT
+RANGE_MULT = float(os.getenv("RANGE_MULT", 1.8))         # range >= range_sma * RANGE_MULT
+VOL_MULT = float(os.getenv("VOL_MULT", 2.5))             # volume >= vol_sma * VOL_MULT
+
+# Compression (squeeze) filter (optional but powerful)
+REQUIRE_SQUEEZE = os.getenv("REQUIRE_SQUEEZE", "1") == "1"
+SQUEEZE_MULT = float(os.getenv("SQUEEZE_MULT", 0.75))    # bb_width <= bb_width_sma * SQUEEZE_MULT
+
+# Momentum candle quality (Strategy #3-friendly defaults: looser than your old ones)
+BODY_PCT = float(os.getenv("BODY_PCT", 0.50))                # body >= BODY_PCT * range
+MAX_WICK_FRAC = float(os.getenv("MAX_WICK_FRAC", 0.45))      # rejection wick cap
 
 # Structure breakout buffer (close beyond structure)
 BREAK_BUFFER = float(os.getenv("BREAK_BUFFER", 0.0012))  # 0.12%
-STRUCT_LOOKBACK = int(os.getenv("STRUCT_LOOKBACK", 50))  # rolling structure lookback
+
+# Structure lookback (Donchian)
+STRUCT_LOOKBACK = int(os.getenv("STRUCT_LOOKBACK", 50))
 
 # No-chop: EMA separation on confirm TF
 MIN_EMA_SEP_PCT = float(os.getenv("MIN_EMA_SEP_PCT", 0.0008))  # 0.08%
 
-# Require displacement on confirm TF too (quality boost)
-REQUIRE_CONFIRM_DISPLACEMENT = os.getenv("REQUIRE_CONFIRM_DISPLACEMENT", "1") == "1"
+# Require expansion on confirm TF too (quality boost)
+REQUIRE_CONFIRM_EXPANSION = os.getenv("REQUIRE_CONFIRM_EXPANSION", "1") == "1"
 
 # Quality market filter
 MIN_QUOTE_VOL_USDT = float(os.getenv("MIN_QUOTE_VOL_USDT", 30_000_000))  # 24h quote vol floor
@@ -123,6 +136,7 @@ LEV_TIGHT_STOP_PCT = float(os.getenv("LEV_TIGHT_STOP_PCT", 0.60))  # <0.60% => t
 TP_ALLOCS = [40, 40, 20]
 
 # Custom TP ratios (R-based)
+# Example: TP_RATIOS="1,2.25,3.25"
 TP_RATIOS_RAW = os.getenv("TP_RATIOS", "1,2,3")
 TP_RATIOS = [float(x.strip()) for x in TP_RATIOS_RAW.split(",") if x.strip()]
 if len(TP_RATIOS) != 3:
@@ -140,7 +154,7 @@ EXTENDED_FROM_EMA_FAST_PCT = float(os.getenv("EXTENDED_FROM_EMA_FAST_PCT", 0.004
 PULLBACK_ENTRY_BLEND = float(os.getenv("PULLBACK_ENTRY_BLEND", 0.6))  # weight toward break level (0..1)
 SHORT_PULLBACK_CAP_PCT = float(os.getenv("SHORT_PULLBACK_CAP_PCT", 0.006))  # cap pullback entry above current
 
-# Pending expiry (FIX: avoid endless pending)
+# Pending expiry (avoid endless pending)
 PENDING_EXPIRY_SECS = int(os.getenv("PENDING_EXPIRY_SECS", 6 * 3600))  # 6h default
 
 # ======================================================
@@ -154,19 +168,10 @@ open_trades = {}
 open_trades_lock = threading.Lock()
 
 # ======================================================
-# TELEGRAM (FIXED: POST + error checks + split long)
+# TELEGRAM
 # ======================================================
 
 TELEGRAM_API = "https://api.telegram.org"
-
-def _telegram_post(cid: str, text: str):
-    url = f"{TELEGRAM_API}/bot{BOT_TOKEN}/sendMessage"
-    try:
-        resp = requests.post(url, json={"chat_id": cid, "text": text}, timeout=10)
-        if resp.status_code != 200:
-            log.error(f"Telegram send failed ({resp.status_code}) for {cid}: {resp.text[:300]}")
-    except Exception as e:
-        log.error(f"Telegram error for {cid}: {e}")
 
 def send_telegram(text: str):
     if not BOT_TOKEN:
@@ -176,39 +181,48 @@ def send_telegram(text: str):
         log.warning("No chat IDs configured")
         return
 
-    # Telegram message limit ~4096 chars; keep a safety margin
+    # Telegram limit ~4096; keep margin
     MAX_LEN = 3800
     chunks = [text[i:i+MAX_LEN] for i in range(0, len(text), MAX_LEN)]
+
     for cid in CHAT_IDS:
         for ch in chunks:
-            _telegram_post(cid, ch)
+            try:
+                url = f"{TELEGRAM_API}/bot{BOT_TOKEN}/sendMessage"
+                resp = requests.post(url, json={"chat_id": cid, "text": ch}, timeout=10)
+                if resp.status_code != 200:
+                    log.error(f"Telegram send failed ({resp.status_code}) for {cid}: {resp.text[:300]}")
+            except Exception as e:
+                log.error(f"Telegram error for {cid}: {e}")
 
 def send_startup():
     r1, r2, r3 = TP_RATIOS
     msg = (
         "🚀 FUTURES ELITE+ MOMENTUM BOT (INFO ONLY)\n\n"
-        "Exchanges: OKX + KuCoin Futures\n"
-        "Style: Trend-aligned breakout continuation\n"
+        "Style: Breakout + Volatility Expansion (Strategy #3)\n"
         f"TFs: {TF_EXEC} / {TF_CONFIRM} / {TF_REGIME}\n"
         f"Trend: EMA{EMA_FAST}/{EMA_MID}/{EMA_SLOW}\n"
-        f"Displacement: ATR({ATR_LEN}) vs baseline({ATR_BASELINE_LEN}) x{ATR_MULT} + VOLx{VOL_MULT} | Confirm: {REQUIRE_CONFIRM_DISPLACEMENT}\n"
+        f"Breakout: Donchian({STRUCT_LOOKBACK}) + buffer {BREAK_BUFFER*100:.2f}%\n"
+        f"Expansion: ATR({ATR_LEN})≥ATRbase({ATR_BASELINE_LEN})×{ATR_EXP_MULT} | "
+        f"Range×{RANGE_MULT} | Vol×{VOL_MULT}\n"
+        f"Squeeze filter: {REQUIRE_SQUEEZE} (width≤{SQUEEZE_MULT}×baseline)\n"
         f"Candle: body≥{int(BODY_PCT*100)}% | wick≤{int(MAX_WICK_FRAC*100)}%\n"
-        f"Structure: rolling {STRUCT_LOOKBACK} | buffer: {BREAK_BUFFER*100:.2f}%\n"
         f"Pullback mode: {USE_PULLBACK_MODE} | Extended if >{EXTENDED_FROM_EMA_FAST_PCT*100:.2f}% from EMA{EMA_FAST}\n"
         f"Cooldown: {WINDOW}s | Stop-penalty: {STOP_PENALTY_WINDOW}s\n"
         f"Stop: {STOP_ATR_MULT}×ATR | Window: {STOP_MIN_PCT:.2f}%–{STOP_MAX_PCT:.2f}%\n"
         f"TP ratios (R): 1:{r1:g} / 1:{r2:g} / 1:{r3:g} | splits {TP_ALLOCS[0]}/{TP_ALLOCS[1]}/{TP_ALLOCS[2]}\n"
-        f"Position sizing (info): acct={ACCOUNT_USDT:.0f} USDT | risk={RISK_PCT_PER_TRADE:.2f}%\n"
+        f"Position sizing (info): acct={ACCOUNT_USDT:.0f} USDT | risk={RISK_PCT_PER_TRADE:.2f}%\n\n"
+        f"Exchanges: {', '.join(EXCHANGES)}\n"
         f"Scan: {SCAN_INTERVAL}s | Track: {TRACK_INTERVAL}s\n"
     )
     send_telegram(msg)
 
 # ======================================================
-# DUPLICATE + PENALTY COOLDOWN (FIX: include exchange)
+# DUPLICATE + PENALTY COOLDOWN
 # ======================================================
 
 def _cd_key(ex_name: str, symbol: str, direction: str) -> str:
-    return f"{ex_name}|{symbol}|{direction}"
+    return f"{ex_name}_{symbol}_{direction}"
 
 def allow(ex_name: str, symbol: str, direction: str) -> bool:
     now = time.time()
@@ -219,7 +233,11 @@ def allow(ex_name: str, symbol: str, direction: str) -> bool:
         return False
 
     last = recent_signals.get(key)
-    if last is None or (now - last > WINDOW):
+    if last is None:
+        recent_signals[key] = now
+        return True
+
+    if now - last > WINDOW:
         recent_signals[key] = now
         return True
 
@@ -232,16 +250,19 @@ def apply_stop_penalty(ex_name: str, symbol: str, direction: str):
     recent_signals[key] = now
 
 # ======================================================
-# INDICATORS (FIXED: ATR baseline length + NaN safety later)
+# INDICATORS
 # ======================================================
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    # EMAs
     df["ema_fast"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
     df["ema_mid"]  = df["close"].ewm(span=EMA_MID, adjust=False).mean()
     df["ema_slow"] = df["close"].ewm(span=EMA_SLOW, adjust=False).mean()
 
+    # Volume baseline
     df["vol_sma"] = df["volume"].rolling(20).mean()
 
+    # True Range / ATR
     prev_close = df["close"].shift(1)
     tr1 = df["high"] - df["low"]
     tr2 = (df["high"] - prev_close).abs()
@@ -249,9 +270,26 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["tr"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
     df["atr"] = df["tr"].rolling(ATR_LEN).mean()
-    df["atr_sma"] = df["atr"].rolling(ATR_BASELINE_LEN).mean()
+    df["atr_base"] = df["atr"].rolling(ATR_BASELINE_LEN).mean()
 
+    # Candle range
     df["range"] = df["high"] - df["low"]
+    df["range_sma"] = df["range"].rolling(20).mean()
+
+    # Donchian levels (structure)
+    df["donch_high"] = df["high"].rolling(STRUCT_LOOKBACK).max()
+    df["donch_low"]  = df["low"].rolling(STRUCT_LOOKBACK).min()
+
+    # Bollinger width (compression/squeeze)
+    bb_len = 20
+    bb_std = 2.0
+    mid = df["close"].rolling(bb_len).mean()
+    sd = df["close"].rolling(bb_len).std()
+    upper = mid + bb_std * sd
+    lower = mid - bb_std * sd
+    df["bb_width"] = (upper - lower) / (mid + 1e-9)
+    df["bb_width_sma"] = df["bb_width"].rolling(50).mean()
+
     return df
 
 def get_df(ex, symbol: str, tf: str):
@@ -264,7 +302,7 @@ def get_df(ex, symbol: str, tf: str):
         return None
 
 # ======================================================
-# EXCHANGES (FIXED: enableRateLimit + only OKX/KUCOIN)
+# EXCHANGES
 # ======================================================
 
 def get_ex(name: str):
@@ -274,7 +312,7 @@ def get_ex(name: str):
             return ccxt.okx({"enableRateLimit": True, "options": {"defaultType": "swap"}})
         if name == "kucoin_futures":
             return ccxt.kucoinfutures({"enableRateLimit": True})
-        raise ValueError(f"Unsupported exchange: {name}")
+        return None
     except Exception as e:
         log.error(f"Exchange load error ({name}): {e}")
         return None
@@ -290,14 +328,14 @@ def get_ex_cached(name: str):
     return ex
 
 # ======================================================
-# QUALITY UNIVERSE (FIXED: metadata-based, ticker iteration)
+# QUALITY UNIVERSE
 # ======================================================
 
 def build_quality_universe(ex) -> list:
     """
-    Filter to higher quality, liquid USDT linear contracts:
+    Filter to higher quality, liquid markets (metadata-based):
+    - contract/swap/future
     - quote == USDT
-    - contract/swap/future == True
     - active (optional)
     - min 24h quote volume
     - max spread (if bid/ask exists)
@@ -318,7 +356,6 @@ def build_quality_universe(ex) -> list:
         if ALLOW_ONLY_ACTIVE and m.get("active") is False:
             continue
 
-        # contract markets only (perps/futures)
         is_contract = bool(m.get("contract")) or bool(m.get("swap")) or bool(m.get("future"))
         if not is_contract:
             continue
@@ -326,7 +363,7 @@ def build_quality_universe(ex) -> list:
         if m.get("quote") != "USDT":
             continue
 
-        # Prefer linear (USDT-margined) when that field exists
+        # prefer linear when the flag exists
         if "linear" in m and m.get("linear") is False:
             continue
 
@@ -340,7 +377,6 @@ def build_quality_universe(ex) -> list:
         if last <= 0:
             continue
 
-        # Quote volume (prefer native quoteVolume)
         qv = t.get("quoteVolume")
         if qv is None:
             bv = t.get("baseVolume")
@@ -378,38 +414,29 @@ def build_quality_universe(ex) -> list:
     return [s for s, _ in out[:PAIR_LIMIT]]
 
 # ======================================================
-# TOP MOVERS (FIXED: ticker-first, then OHLCV)
+# TOP MOVERS (ticker-first, then OHLCV confirm)
 # ======================================================
 
 def detect_top_movers(ex):
-    """
-    Step 1: build quality universe (metadata + tickers)
-    Step 2: rank candidates cheaply using ticker % change + volume
-    Step 3: confirm with OHLCV ONLY for shortlisted candidates
-    """
     try:
-        markets = ex.load_markets()
         tickers = ex.fetch_tickers()
     except Exception as e:
         log.error(f"Mover tickers fetch error: {e}")
         return []
 
-    universe = build_quality_universe(ex)
-    if not universe:
+    pairs = build_quality_universe(ex)
+    if not pairs:
         return []
 
-    # Cheap ranking: percentage + volume
-    cheap_scores = []
-    for s in universe:
+    # Cheap pre-score by (ticker % change) + (volume)
+    cheap = []
+    for s in pairs:
         t = tickers.get(s)
         if not t:
             continue
-
-        # Prefer 'percentage' if available; else approximate with change/last
         pct = t.get("percentage")
         last = t.get("last") or t.get("close")
         change = t.get("change")
-
         try:
             if pct is not None:
                 pct_val = float(pct)
@@ -422,7 +449,6 @@ def detect_top_movers(ex):
 
         qv = t.get("quoteVolume")
         if qv is None:
-            # fallback (rough)
             bv = t.get("baseVolume")
             if bv is None or last is None:
                 continue
@@ -436,16 +462,14 @@ def detect_top_movers(ex):
             except Exception:
                 continue
 
-        # Simple blended score: move * log(volume)
         score = pct_val * 0.7 + (qv / 1_000_000.0) * 0.3
-        cheap_scores.append((s, score))
+        cheap.append((s, score))
 
-    cheap_scores.sort(key=lambda x: x[1], reverse=True)
-
+    cheap.sort(key=lambda x: x[1], reverse=True)
     shortlist_n = max(TOP_MOVER_COUNT * MOVER_CANDIDATE_MULT, TOP_MOVER_COUNT)
-    candidates = [s for s, _ in cheap_scores[:shortlist_n]]
+    candidates = [s for s, _ in cheap[:shortlist_n]]
 
-    # Confirm with OHLCV (your original concept, but only on candidates)
+    # Confirm using recent candle momentum + volume ratio on TF_CONFIRM
     movers = []
     for s in candidates:
         df = get_df(ex, s, TF_CONFIRM)
@@ -489,27 +513,9 @@ def ema_separation_ok(df_confirm) -> bool:
         return False
     if pd.isna(last["ema_fast"]) or pd.isna(last["ema_mid"]) or pd.isna(last["ema_slow"]):
         return False
-
     sep1 = abs(float(last["ema_fast"]) - float(last["ema_mid"])) / price
     sep2 = abs(float(last["ema_mid"]) - float(last["ema_slow"])) / price
     return (sep1 >= MIN_EMA_SEP_PCT) and (sep2 >= MIN_EMA_SEP_PCT)
-
-def strong_displacement(df) -> bool:
-    last = df.iloc[-1]
-    # NaN guards
-    for k in ("atr", "atr_sma", "volume", "vol_sma"):
-        if k not in last or pd.isna(last[k]):
-            return False
-
-    atr = float(last["atr"])
-    atr_base = float(last["atr_sma"])
-    vol = float(last["volume"])
-    vol_sma = float(last["vol_sma"])
-
-    if atr <= 0 or atr_base <= 0 or vol_sma <= 0:
-        return False
-
-    return (atr >= atr_base * ATR_MULT) and (vol >= vol_sma * VOL_MULT)
 
 def momentum_candle_ok(last, direction: str) -> bool:
     rng = float(last["range"])
@@ -538,32 +544,71 @@ def momentum_candle_ok(last, direction: str) -> bool:
         return False
     return True
 
-# ======================================================
-# STRUCTURE BREAKOUT (FIXED: rolling structure, non-stale)
-# ======================================================
-
 def breakout_levels(df_exec, direction: str):
+    """
+    Donchian breakout using PRIOR structure (shift(1)) so we don't “include” the breakout candle itself.
+    """
     if len(df_exec) < STRUCT_LOOKBACK + 5:
         return None
 
     last_close = float(df_exec["close"].iloc[-1])
 
     if direction == "LONG":
-        prev_high = df_exec["high"].rolling(STRUCT_LOOKBACK).max().shift(1).iloc[-1]
-        if pd.isna(prev_high) or prev_high <= 0:
+        prev_high = df_exec["donch_high"].shift(1).iloc[-1]
+        if pd.isna(prev_high) or float(prev_high) <= 0:
             return None
         break_level = float(prev_high) * (1.0 + BREAK_BUFFER)
         if last_close > break_level:
             return {"break_level": float(break_level), "swing": float(prev_high)}
         return None
 
-    prev_low = df_exec["low"].rolling(STRUCT_LOOKBACK).min().shift(1).iloc[-1]
-    if pd.isna(prev_low) or prev_low <= 0:
+    prev_low = df_exec["donch_low"].shift(1).iloc[-1]
+    if pd.isna(prev_low) or float(prev_low) <= 0:
         return None
     break_level = float(prev_low) * (1.0 - BREAK_BUFFER)
     if last_close < break_level:
         return {"break_level": float(break_level), "swing": float(prev_low)}
     return None
+
+def vol_expansion_ok(df) -> bool:
+    """
+    Strategy #3 core: expansion + (optional) prior compression.
+    Requires:
+    - ATR expansion vs baseline
+    - Candle range expansion vs baseline
+    - Volume expansion vs baseline
+    - Optional squeeze filter via Bollinger width
+    """
+    last = df.iloc[-1]
+    needed = ["atr", "atr_base", "volume", "vol_sma", "range", "range_sma", "bb_width", "bb_width_sma"]
+    for k in needed:
+        if k not in last or pd.isna(last[k]):
+            return False
+
+    atr = float(last["atr"])
+    atr_base = float(last["atr_base"])
+    rng = float(last["range"])
+    rng_sma = float(last["range_sma"])
+    vol = float(last["volume"])
+    vol_sma = float(last["vol_sma"])
+
+    if atr <= 0 or atr_base <= 0 or rng_sma <= 0 or vol_sma <= 0:
+        return False
+
+    atr_ok = atr >= atr_base * ATR_EXP_MULT
+    range_ok = rng >= rng_sma * RANGE_MULT
+    vol_ok = vol >= vol_sma * VOL_MULT
+
+    if not (atr_ok and range_ok and vol_ok):
+        return False
+
+    if REQUIRE_SQUEEZE:
+        bw = float(last["bb_width"])
+        bw_sma = float(last["bb_width_sma"])
+        if bw_sma > 0 and bw > bw_sma * SQUEEZE_MULT:
+            return False
+
+    return True
 
 # ======================================================
 # PULLBACK ENTRY LOGIC (A vs A+)
@@ -592,17 +637,14 @@ def choose_entry(direction: str, last_exec, break_level: float) -> tuple:
     blended = (PULLBACK_ENTRY_BLEND * float(break_level)) + ((1.0 - PULLBACK_ENTRY_BLEND) * float(ema_fast))
 
     if direction == "LONG":
-        # Pullback wants retest near break level, not above current
-        entry = min(blended, price)
-        entry = max(entry, float(break_level))
+        entry = min(blended, price)          # don't set above current
+        entry = max(entry, float(break_level))  # don't set below break
         return ("PULLBACK", float(entry))
 
-    # SHORT: pullback upward after breakdown
-    entry = max(blended, price)
+    entry = max(blended, price)  # short pullback is above current
     cap = float(price) * (1.0 + SHORT_PULLBACK_CAP_PCT)
     entry = min(entry, cap)
-    # For symmetry, don't allow entry below break_level on shorts (optional but sane)
-    entry = max(entry, float(break_level))
+    entry = max(entry, float(break_level))  # keep it at/above break
     return ("PULLBACK", float(entry))
 
 # ======================================================
@@ -636,6 +678,7 @@ def build_r_based_tps(entry: float, stop: float, direction: str):
     R = abs(entry - stop)
     if R <= 0:
         return None
+
     r1, r2, r3 = TP_RATIOS
     if direction == "LONG":
         return [entry + r1 * R, entry + r2 * R, entry + r3 * R]
@@ -659,10 +702,13 @@ def recommended_position_size(entry: float, stop: float, leverage: int):
     margin = notional / max(leverage, 1)
     return float(notional), float(margin), float(risk_usdt), float(stop_pct)
 
-def expected_tp_label(entry_type: str, ema_sep_ok_flag: bool, confirm_disp_ok_flag: bool):
+def expected_tp_label(entry_type: str, ema_sep_ok_flag: bool, confirm_exp_ok_flag: bool):
+    """
+    Heuristic label ONLY (not a guarantee).
+    """
     if entry_type == "PULLBACK":
         return "TP1 most likely (TP2 possible)"
-    if ema_sep_ok_flag and confirm_disp_ok_flag:
+    if ema_sep_ok_flag and confirm_exp_ok_flag:
         return "TP2 most likely (TP3 runner possible)"
     return "TP1 most likely (TP2 possible)"
 
@@ -671,7 +717,7 @@ def expected_tp_label(entry_type: str, ema_sep_ok_flag: bool, confirm_disp_ok_fl
 # ======================================================
 
 def build_trade(ex_name: str, symbol: str, direction: str, entry_price: float, atr: float,
-                entry_type: str, break_level: float, ema_sep_ok_flag: bool, confirm_disp_ok_flag: bool):
+                entry_type: str, break_level: float, ema_sep_ok_flag: bool, confirm_exp_ok_flag: bool):
     stop = entry_price - STOP_ATR_MULT * atr if direction == "LONG" else entry_price + STOP_ATR_MULT * atr
     stop_pct = abs(entry_price - stop) / entry_price * 100.0 if entry_price > 0 else 999.0
 
@@ -706,7 +752,7 @@ def build_trade(ex_name: str, symbol: str, direction: str, entry_price: float, a
         "filled_ts": now if entry_type == "NOW" else None,
         "realized_pct": 0.0,
         "ema_sep_ok": bool(ema_sep_ok_flag),
-        "confirm_disp_ok": bool(confirm_disp_ok_flag),
+        "confirm_exp_ok": bool(confirm_exp_ok_flag),
     }
 
 def send_signal(trade: dict):
@@ -718,12 +764,14 @@ def send_signal(trade: dict):
 
     header = "📌 FUTURES LIMIT " + direction + (" (A+) ENTER NOW" if entry_type == "NOW" else " (A) PULLBACK LIMIT")
 
+    # Position sizing
     pos = recommended_position_size(trade["entry"], trade["stop"], trade["leverage"])
     if pos:
         notional, margin, risk_usdt, stop_pct = pos
     else:
         notional, margin, risk_usdt, stop_pct = 0.0, 0.0, 0.0, 0.0
 
+    # Estimated returns at TP levels (leveraged, informational)
     tp1, tp2, tp3 = trade["tps"]
     ret1 = calc_profit_pct(trade["entry"], tp1, direction, trade["leverage"])
     ret2 = calc_profit_pct(trade["entry"], tp2, direction, trade["leverage"])
@@ -731,7 +779,7 @@ def send_signal(trade: dict):
 
     r1, r2, r3 = TP_RATIOS
     rr_text = f"RR targets: 1:{r1:g} / 1:{r2:g} / 1:{r3:g}"
-    tp_expect = expected_tp_label(entry_type, trade.get("ema_sep_ok", False), trade.get("confirm_disp_ok", False))
+    tp_expect = expected_tp_label(entry_type, trade.get("ema_sep_ok", False), trade.get("confirm_exp_ok", False))
 
     msg = (
         f"{header}\n\n"
@@ -786,7 +834,7 @@ def tracker_loop():
                 if not ex:
                     continue
 
-                # Pending expiry (FIX)
+                # Pending expiry (avoid endless pending)
                 if t.get("status") == "PENDING":
                     created_ts = int(t.get("created_ts") or 0)
                     if created_ts and (time.time() - created_ts) > PENDING_EXPIRY_SECS:
@@ -854,7 +902,7 @@ def tracker_loop():
                         f"Price: {last_price}"
                     )
 
-                    # Stop-hit penalty cooldown (FIX: include exchange)
+                    # Stop-hit penalty cooldown
                     apply_stop_penalty(t["ex_name"], t["symbol"], direction)
 
                     with open_trades_lock:
@@ -922,6 +970,10 @@ def scanner_loop():
 
     while True:
         for ex_name in EXCHANGES:
+            ex_name = ex_name.strip()
+            if not ex_name:
+                continue
+
             ex = get_ex_cached(ex_name)
             if not ex:
                 continue
@@ -936,26 +988,27 @@ def scanner_loop():
                     if df_exec is None or df_confirm is None or df_regime is None:
                         continue
 
-                    # EMA separation gate
+                    # No-chop / trend quality filter
                     ema_ok = ema_separation_ok(df_confirm)
                     if not ema_ok:
                         continue
 
-                    # displacement gates (FIXED + NaN guarded)
-                    exec_disp_ok = strong_displacement(df_exec)
-                    if not exec_disp_ok:
-                        continue
-
-                    confirm_disp_ok = True
-                    if REQUIRE_CONFIRM_DISPLACEMENT:
-                        confirm_disp_ok = strong_displacement(df_confirm)
-                        if not confirm_disp_ok:
-                            continue
-
+                    # Breakout must be present first (structure)
                     last_exec = df_exec.iloc[-1]
                     atr = float(last_exec.get("atr") or 0.0)
                     if atr <= 0 or pd.isna(atr):
                         continue
+
+                    # Expansion gates (Strategy #3 core)
+                    exec_exp_ok = vol_expansion_ok(df_exec)
+                    if not exec_exp_ok:
+                        continue
+
+                    confirm_exp_ok = True
+                    if REQUIRE_CONFIRM_EXPANSION:
+                        confirm_exp_ok = vol_expansion_ok(df_confirm)
+                        if not confirm_exp_ok:
+                            continue
 
                     # LONG
                     if trend_long(df_exec, df_confirm, df_regime):
@@ -965,7 +1018,7 @@ def scanner_loop():
                                 entry_type, entry_price = choose_entry("LONG", last_exec, lv["break_level"])
                                 trade = build_trade(
                                     ex_name, symbol, "LONG", entry_price, atr, entry_type,
-                                    lv["break_level"], ema_ok, confirm_disp_ok
+                                    lv["break_level"], ema_ok, confirm_exp_ok
                                 )
                                 if trade:
                                     send_signal(trade)
@@ -978,7 +1031,7 @@ def scanner_loop():
                                 entry_type, entry_price = choose_entry("SHORT", last_exec, lv["break_level"])
                                 trade = build_trade(
                                     ex_name, symbol, "SHORT", entry_price, atr, entry_type,
-                                    lv["break_level"], ema_ok, confirm_disp_ok
+                                    lv["break_level"], ema_ok, confirm_exp_ok
                                 )
                                 if trade:
                                     send_signal(trade)
@@ -996,7 +1049,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "FUTURES ELITE+ MOMENTUM BOT RUNNING (INFO ONLY) — OKX + KUCOIN FUTURES"
+    return "FUTURES ELITE+ STRATEGY #3 BOT RUNNING (INFO ONLY) — OKX + KUCOIN FUTURES"
 
 if __name__ == "__main__":
     threading.Thread(target=scanner_loop, daemon=True).start()
