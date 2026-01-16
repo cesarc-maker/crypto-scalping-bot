@@ -88,24 +88,25 @@ EMA_SLOW = int(os.getenv("EMA_SLOW", 50))
 
 # --------------------------
 # Strategy #3 core settings
+# (TUNED FOR ~10–15 SIGNALS/DAY)
 # --------------------------
 
 # ATR and baseline
 ATR_LEN = int(os.getenv("ATR_LEN", 14))
 ATR_BASELINE_LEN = int(os.getenv("ATR_BASELINE_LEN", 50))
 
-# Expansion gates
-ATR_EXP_MULT = float(os.getenv("ATR_EXP_MULT", 1.4))     # ATR >= ATR_BASE * ATR_EXP_MULT
-RANGE_MULT = float(os.getenv("RANGE_MULT", 1.8))         # range >= range_sma * RANGE_MULT
-VOL_MULT = float(os.getenv("VOL_MULT", 2.5))             # volume >= vol_sma * VOL_MULT
+# Expansion gates (loosened)
+ATR_EXP_MULT = float(os.getenv("ATR_EXP_MULT", 1.25))     # was 1.4
+RANGE_MULT = float(os.getenv("RANGE_MULT", 1.50))         # was 1.8
+VOL_MULT = float(os.getenv("VOL_MULT", 2.00))             # was 2.5
 
-# Optional squeeze filter
+# Optional squeeze filter (kept, but less strict)
 REQUIRE_SQUEEZE = os.getenv("REQUIRE_SQUEEZE", "1") == "1"
-SQUEEZE_MULT = float(os.getenv("SQUEEZE_MULT", 0.75))    # bb_width <= bb_width_sma * SQUEEZE_MULT
+SQUEEZE_MULT = float(os.getenv("SQUEEZE_MULT", 0.90))    # was 0.75
 
-# Momentum candle quality (Strategy #3-friendly defaults)
-BODY_PCT = float(os.getenv("BODY_PCT", 0.50))            # body >= BODY_PCT * range
-MAX_WICK_FRAC = float(os.getenv("MAX_WICK_FRAC", 0.45))  # rejection wick cap
+# Momentum candle quality
+BODY_PCT = float(os.getenv("BODY_PCT", 0.50))
+MAX_WICK_FRAC = float(os.getenv("MAX_WICK_FRAC", 0.45))
 
 # Structure breakout buffer (close beyond structure)
 BREAK_BUFFER = float(os.getenv("BREAK_BUFFER", 0.0012))  # 0.12%
@@ -116,11 +117,11 @@ STRUCT_LOOKBACK = int(os.getenv("STRUCT_LOOKBACK", 50))
 # No-chop: EMA separation on confirm TF
 MIN_EMA_SEP_PCT = float(os.getenv("MIN_EMA_SEP_PCT", 0.0008))  # 0.08%
 
-# Require expansion on confirm TF too (quality boost)
-REQUIRE_CONFIRM_EXPANSION = os.getenv("REQUIRE_CONFIRM_EXPANSION", "1") == "1"
+# Require expansion on confirm TF too (disabled for more signals)
+REQUIRE_CONFIRM_EXPANSION = os.getenv("REQUIRE_CONFIRM_EXPANSION", "0") == "1"
 
-# Quality market filter
-MIN_QUOTE_VOL_USDT = float(os.getenv("MIN_QUOTE_VOL_USDT", 30_000_000))  # 24h quote vol floor
+# Quality market filter (lowered for more pairs)
+MIN_QUOTE_VOL_USDT = float(os.getenv("MIN_QUOTE_VOL_USDT", 8_000_000))  # was 30M
 MAX_SPREAD_BPS = float(os.getenv("MAX_SPREAD_BPS", 25))                  # 0.25% max spread
 ALLOW_ONLY_ACTIVE = os.getenv("ALLOW_ONLY_ACTIVE", "1") == "1"
 
@@ -182,7 +183,6 @@ def send_telegram(text: str):
         log.warning("No chat IDs configured")
         return
 
-    # Telegram message limit ~4096 chars; keep margin
     MAX_LEN = 3800
     chunks = [text[i:i+MAX_LEN] for i in range(0, len(text), MAX_LEN)]
 
@@ -255,15 +255,12 @@ def apply_stop_penalty(ex_name: str, symbol: str, direction: str):
 # ======================================================
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    # EMAs
     df["ema_fast"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
     df["ema_mid"]  = df["close"].ewm(span=EMA_MID, adjust=False).mean()
     df["ema_slow"] = df["close"].ewm(span=EMA_SLOW, adjust=False).mean()
 
-    # Volume baseline
     df["vol_sma"] = df["volume"].rolling(20).mean()
 
-    # True Range / ATR
     prev_close = df["close"].shift(1)
     tr1 = df["high"] - df["low"]
     tr2 = (df["high"] - prev_close).abs()
@@ -273,15 +270,12 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["atr"] = df["tr"].rolling(ATR_LEN).mean()
     df["atr_base"] = df["atr"].rolling(ATR_BASELINE_LEN).mean()
 
-    # Candle range + baseline
     df["range"] = df["high"] - df["low"]
     df["range_sma"] = df["range"].rolling(20).mean()
 
-    # Donchian structure
     df["donch_high"] = df["high"].rolling(STRUCT_LOOKBACK).max()
     df["donch_low"]  = df["low"].rolling(STRUCT_LOOKBACK).min()
 
-    # Bollinger width (compression/squeeze)
     bb_len = 20
     bb_std = 2.0
     mid = df["close"].rolling(bb_len).mean()
@@ -333,14 +327,6 @@ def get_ex_cached(name: str):
 # ======================================================
 
 def build_quality_universe(ex) -> list:
-    """
-    Filter to higher quality, liquid markets:
-    - contract/swap/future
-    - quote == USDT
-    - active (optional)
-    - min 24h quote volume
-    - max spread (if bid/ask exists)
-    """
     try:
         markets = ex.load_markets()
         tickers = ex.fetch_tickers()
@@ -364,7 +350,6 @@ def build_quality_universe(ex) -> list:
         if m.get("quote") != "USDT":
             continue
 
-        # prefer linear when field exists
         if "linear" in m and m.get("linear") is False:
             continue
 
@@ -419,9 +404,6 @@ def build_quality_universe(ex) -> list:
 # ======================================================
 
 def detect_top_movers(ex):
-    """
-    Ticker-first shortlist, then confirm with TF_CONFIRM OHLCV for score.
-    """
     try:
         tickers = ex.fetch_tickers()
     except Exception as e:
@@ -487,7 +469,6 @@ def detect_top_movers(ex):
         pct_change = (df["close"].iloc[-1] - df["close"].iloc[-4]) / df["close"].iloc[-4] * 100.0
         vol_ratio = df["volume"].iloc[-1] / (last_vol_sma + 1e-9)
         score = pct_change * 0.55 + vol_ratio * 0.45
-
         movers.append((s, score))
 
     movers.sort(key=lambda x: x[1], reverse=True)
@@ -550,9 +531,6 @@ def momentum_candle_ok(last, direction: str) -> bool:
     return True
 
 def breakout_levels(df_exec, direction: str):
-    """
-    Donchian breakout using PRIOR structure (shift(1)) so breakout candle isn't included in the level.
-    """
     if len(df_exec) < STRUCT_LOOKBACK + 5:
         return None
 
@@ -576,14 +554,6 @@ def breakout_levels(df_exec, direction: str):
     return None
 
 def vol_expansion_ok(df) -> bool:
-    """
-    Strategy #3: expansion + (optional) compression.
-    Requires:
-    - ATR expansion vs baseline
-    - Candle range expansion vs baseline
-    - Volume expansion vs baseline
-    - Optional squeeze via Bollinger width
-    """
     last = df.iloc[-1]
     needed = ["atr", "atr_base", "volume", "vol_sma", "range", "range_sma", "bb_width", "bb_width_sma"]
     for k in needed:
@@ -628,11 +598,6 @@ def is_extended_from_ema_fast(last_exec) -> bool:
     return dist >= EXTENDED_FROM_EMA_FAST_PCT
 
 def choose_entry(direction: str, last_exec, break_level: float) -> tuple:
-    """
-    Returns (entry_type, entry_price)
-    - "NOW": A+ entry reference at close
-    - "PULLBACK": A entry reference at limit pullback; tracking begins on fill
-    """
     price = float(last_exec["close"])
     ema_fast = float(last_exec["ema_fast"])
 
@@ -667,7 +632,6 @@ def format_duration(seconds: int) -> str:
     return f"{mins} min"
 
 def calc_profit_pct(entry: float, price: float, direction: str, leverage: int) -> float:
-    # informational estimate; ignores fees/funding/slippage
     if entry <= 0:
         return 0.0
     if direction == "LONG":
@@ -690,10 +654,6 @@ def build_r_based_tps(entry: float, stop: float, direction: str):
     return [entry - r1 * R, entry - r2 * R, entry - r3 * R]
 
 def recommended_position_size(entry: float, stop: float, leverage: int):
-    """
-    Returns (notional_usdt, margin_usdt, risk_usdt, stop_pct)
-    Informational only; ignores fees/funding/slippage.
-    """
     stop_dist = abs(entry - stop)
     if entry <= 0 or stop_dist <= 0:
         return None
@@ -701,19 +661,13 @@ def recommended_position_size(entry: float, stop: float, leverage: int):
     stop_pct = (stop_dist / entry) * 100.0
     risk_usdt = ACCOUNT_USDT * (RISK_PCT_PER_TRADE / 100.0)
 
-    # Notional such that loss at stop ~= risk_usdt
     notional = risk_usdt * (entry / stop_dist)
-
-    # Clamp notional
     notional = max(MIN_NOTIONAL_USDT, min(notional, MAX_NOTIONAL_USDT))
 
     margin = notional / max(leverage, 1)
     return float(notional), float(margin), float(risk_usdt), float(stop_pct)
 
 def expected_tp_label(entry_type: str, ema_sep_ok_flag: bool, confirm_exp_ok_flag: bool):
-    """
-    Heuristic label ONLY (not a guarantee).
-    """
     if entry_type == "PULLBACK":
         return "TP1 most likely (TP2 possible)"
     if ema_sep_ok_flag and confirm_exp_ok_flag:
@@ -729,7 +683,6 @@ def build_trade(ex_name: str, symbol: str, direction: str, entry_price: float, a
     stop = entry_price - STOP_ATR_MULT * atr if direction == "LONG" else entry_price + STOP_ATR_MULT * atr
     stop_pct = abs(entry_price - stop) / entry_price * 100.0 if entry_price > 0 else 999.0
 
-    # enforce stop window
     if stop_pct < STOP_MIN_PCT or stop_pct > STOP_MAX_PCT:
         return None
 
@@ -753,7 +706,7 @@ def build_trade(ex_name: str, symbol: str, direction: str, entry_price: float, a
         "tp_hits": [False, False, False],
         "leverage": int(leverage),
         "risk": risk,
-        "entry_type": entry_type,  # NOW or PULLBACK
+        "entry_type": entry_type,
         "status": "ACTIVE" if entry_type == "NOW" else "PENDING",
         "created_ts": now,
         "start_ts": now if entry_type == "NOW" else None,
@@ -772,14 +725,12 @@ def send_signal(trade: dict):
 
     header = "📌 FUTURES LIMIT " + direction + (" (A+) ENTER NOW" if entry_type == "NOW" else " (A) PULLBACK LIMIT")
 
-    # Position sizing
     pos = recommended_position_size(trade["entry"], trade["stop"], trade["leverage"])
     if pos:
         notional, margin, risk_usdt, stop_pct = pos
     else:
         notional, margin, risk_usdt, stop_pct = 0.0, 0.0, 0.0, 0.0
 
-    # Estimated returns at TP levels (leveraged, informational)
     tp1, tp2, tp3 = trade["tps"]
     ret1 = calc_profit_pct(trade["entry"], tp1, direction, trade["leverage"])
     ret2 = calc_profit_pct(trade["entry"], tp2, direction, trade["leverage"])
@@ -814,7 +765,6 @@ def send_signal(trade: dict):
     send_telegram(msg)
     log.info(f"Signal sent → {trade['ex_name']} {trade['symbol']} {direction} {entry_type}")
 
-    # Register trade for tracking
     trade_key = f"{trade['ex_name']}|{trade['symbol']}|{direction}|{int(time.time())}"
     with open_trades_lock:
         open_trades[trade_key] = trade
@@ -908,14 +858,12 @@ def tracker_loop():
                         f"Price: {last_price}"
                     )
 
-                    # Stop-hit penalty cooldown
                     apply_stop_penalty(t["ex_name"], t["symbol"], direction)
 
                     with open_trades_lock:
                         open_trades.pop(k, None)
                     continue
 
-                # TP HITS
                 tps = t["tps"]
                 allocs = t.get("tp_allocs", TP_ALLOCS)
                 hit_any = False
@@ -994,12 +942,10 @@ def scanner_loop():
                     if df_exec is None or df_confirm is None or df_regime is None:
                         continue
 
-                    # No-chop / quality filter
                     ema_ok = ema_separation_ok(df_confirm)
                     if not ema_ok:
                         continue
 
-                    # Expansion gates (Strategy #3 core)
                     exec_exp_ok = vol_expansion_ok(df_exec)
                     if not exec_exp_ok:
                         continue
