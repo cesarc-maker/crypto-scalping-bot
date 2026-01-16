@@ -1,10 +1,10 @@
 # ======================================================
 # FUTURES ELITE+ MOMENTUM SIGNAL BOT (INFO ONLY)
-# OKX + KUCOIN FUTURES • TOP MOVERS (ticker-first)
-# 3-TF TREND • BREAKOUT (DONCHIAN) • VOL EXPANSION (ATR+RANGE+VOL) • SQUEEZE FILTER
+# OKX + KUCOIN FUTURES • TOP MOVERS • 3-TF TREND
+# DONCHIAN BREAKOUT • VOL EXPANSION (ATR+RANGE+VOL) • OPTIONAL SQUEEZE
 # PULLBACK ENTRY MODE (A vs A+) • STOP-PENALTY COOLDOWN
 # R-BASED TPs (CUSTOM RATIOS) • TP/SL TRACKING • POSITION SIZING (INFO)
-# SAME STRUCTURE AS YOUR PREVIOUS BOT (Render-ready)
+# SAME STRUCTURE AS YOUR ORIGINAL FIRST BOT (Render-ready)
 # ======================================================
 
 import os
@@ -59,9 +59,9 @@ TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 15))      # seconds
 # Universe size and mover selection
 PAIR_LIMIT = int(os.getenv("PAIR_LIMIT", 120))
 TOP_MOVER_COUNT = int(os.getenv("TOP_MOVER_COUNT", 12))
-MOVER_CANDIDATE_MULT = int(os.getenv("MOVER_CANDIDATE_MULT", 5))  # shortlist size = TOP_MOVER_COUNT * this
+MOVER_CANDIDATE_MULT = int(os.getenv("MOVER_CANDIDATE_MULT", 5))  # shortlist size multiplier
 
-# Regular cooldown per symbol+direction
+# Regular cooldown per exchange+symbol+direction
 WINDOW = int(os.getenv("WINDOW", 1800))  # 30 min default
 
 # Stop-hit penalty cooldown
@@ -86,24 +86,26 @@ EMA_FAST = int(os.getenv("EMA_FAST", 9))
 EMA_MID = int(os.getenv("EMA_MID", 20))
 EMA_SLOW = int(os.getenv("EMA_SLOW", 50))
 
-# ---- Strategy #3: Breakout + Volatility Expansion tuning ----
+# --------------------------
+# Strategy #3 core settings
+# --------------------------
 
-# ATR and baseline (FIX: baseline longer than ATR length)
+# ATR and baseline
 ATR_LEN = int(os.getenv("ATR_LEN", 14))
 ATR_BASELINE_LEN = int(os.getenv("ATR_BASELINE_LEN", 50))
 
-# Expansion gates (true “impulse”)
+# Expansion gates
 ATR_EXP_MULT = float(os.getenv("ATR_EXP_MULT", 1.4))     # ATR >= ATR_BASE * ATR_EXP_MULT
 RANGE_MULT = float(os.getenv("RANGE_MULT", 1.8))         # range >= range_sma * RANGE_MULT
 VOL_MULT = float(os.getenv("VOL_MULT", 2.5))             # volume >= vol_sma * VOL_MULT
 
-# Compression (squeeze) filter (optional but powerful)
+# Optional squeeze filter
 REQUIRE_SQUEEZE = os.getenv("REQUIRE_SQUEEZE", "1") == "1"
 SQUEEZE_MULT = float(os.getenv("SQUEEZE_MULT", 0.75))    # bb_width <= bb_width_sma * SQUEEZE_MULT
 
-# Momentum candle quality (Strategy #3-friendly defaults: looser than your old ones)
-BODY_PCT = float(os.getenv("BODY_PCT", 0.50))                # body >= BODY_PCT * range
-MAX_WICK_FRAC = float(os.getenv("MAX_WICK_FRAC", 0.45))      # rejection wick cap
+# Momentum candle quality (Strategy #3-friendly defaults)
+BODY_PCT = float(os.getenv("BODY_PCT", 0.50))            # body >= BODY_PCT * range
+MAX_WICK_FRAC = float(os.getenv("MAX_WICK_FRAC", 0.45))  # rejection wick cap
 
 # Structure breakout buffer (close beyond structure)
 BREAK_BUFFER = float(os.getenv("BREAK_BUFFER", 0.0012))  # 0.12%
@@ -136,7 +138,6 @@ LEV_TIGHT_STOP_PCT = float(os.getenv("LEV_TIGHT_STOP_PCT", 0.60))  # <0.60% => t
 TP_ALLOCS = [40, 40, 20]
 
 # Custom TP ratios (R-based)
-# Example: TP_RATIOS="1,2.25,3.25"
 TP_RATIOS_RAW = os.getenv("TP_RATIOS", "1,2,3")
 TP_RATIOS = [float(x.strip()) for x in TP_RATIOS_RAW.split(",") if x.strip()]
 if len(TP_RATIOS) != 3:
@@ -181,7 +182,7 @@ def send_telegram(text: str):
         log.warning("No chat IDs configured")
         return
 
-    # Telegram limit ~4096; keep margin
+    # Telegram message limit ~4096 chars; keep margin
     MAX_LEN = 3800
     chunks = [text[i:i+MAX_LEN] for i in range(0, len(text), MAX_LEN)]
 
@@ -205,7 +206,7 @@ def send_startup():
         f"Breakout: Donchian({STRUCT_LOOKBACK}) + buffer {BREAK_BUFFER*100:.2f}%\n"
         f"Expansion: ATR({ATR_LEN})≥ATRbase({ATR_BASELINE_LEN})×{ATR_EXP_MULT} | "
         f"Range×{RANGE_MULT} | Vol×{VOL_MULT}\n"
-        f"Squeeze filter: {REQUIRE_SQUEEZE} (width≤{SQUEEZE_MULT}×baseline)\n"
+        f"Squeeze: {REQUIRE_SQUEEZE} (width≤{SQUEEZE_MULT}×baseline)\n"
         f"Candle: body≥{int(BODY_PCT*100)}% | wick≤{int(MAX_WICK_FRAC*100)}%\n"
         f"Pullback mode: {USE_PULLBACK_MODE} | Extended if >{EXTENDED_FROM_EMA_FAST_PCT*100:.2f}% from EMA{EMA_FAST}\n"
         f"Cooldown: {WINDOW}s | Stop-penalty: {STOP_PENALTY_WINDOW}s\n"
@@ -272,11 +273,11 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["atr"] = df["tr"].rolling(ATR_LEN).mean()
     df["atr_base"] = df["atr"].rolling(ATR_BASELINE_LEN).mean()
 
-    # Candle range
+    # Candle range + baseline
     df["range"] = df["high"] - df["low"]
     df["range_sma"] = df["range"].rolling(20).mean()
 
-    # Donchian levels (structure)
+    # Donchian structure
     df["donch_high"] = df["high"].rolling(STRUCT_LOOKBACK).max()
     df["donch_low"]  = df["low"].rolling(STRUCT_LOOKBACK).min()
 
@@ -333,7 +334,7 @@ def get_ex_cached(name: str):
 
 def build_quality_universe(ex) -> list:
     """
-    Filter to higher quality, liquid markets (metadata-based):
+    Filter to higher quality, liquid markets:
     - contract/swap/future
     - quote == USDT
     - active (optional)
@@ -363,7 +364,7 @@ def build_quality_universe(ex) -> list:
         if m.get("quote") != "USDT":
             continue
 
-        # prefer linear when the flag exists
+        # prefer linear when field exists
         if "linear" in m and m.get("linear") is False:
             continue
 
@@ -414,10 +415,13 @@ def build_quality_universe(ex) -> list:
     return [s for s, _ in out[:PAIR_LIMIT]]
 
 # ======================================================
-# TOP MOVERS (ticker-first, then OHLCV confirm)
+# TOP MOVERS
 # ======================================================
 
 def detect_top_movers(ex):
+    """
+    Ticker-first shortlist, then confirm with TF_CONFIRM OHLCV for score.
+    """
     try:
         tickers = ex.fetch_tickers()
     except Exception as e:
@@ -428,15 +432,16 @@ def detect_top_movers(ex):
     if not pairs:
         return []
 
-    # Cheap pre-score by (ticker % change) + (volume)
     cheap = []
     for s in pairs:
         t = tickers.get(s)
         if not t:
             continue
+
         pct = t.get("percentage")
         last = t.get("last") or t.get("close")
         change = t.get("change")
+
         try:
             if pct is not None:
                 pct_val = float(pct)
@@ -469,7 +474,6 @@ def detect_top_movers(ex):
     shortlist_n = max(TOP_MOVER_COUNT * MOVER_CANDIDATE_MULT, TOP_MOVER_COUNT)
     candidates = [s for s, _ in cheap[:shortlist_n]]
 
-    # Confirm using recent candle momentum + volume ratio on TF_CONFIRM
     movers = []
     for s in candidates:
         df = get_df(ex, s, TF_CONFIRM)
@@ -483,6 +487,7 @@ def detect_top_movers(ex):
         pct_change = (df["close"].iloc[-1] - df["close"].iloc[-4]) / df["close"].iloc[-4] * 100.0
         vol_ratio = df["volume"].iloc[-1] / (last_vol_sma + 1e-9)
         score = pct_change * 0.55 + vol_ratio * 0.45
+
         movers.append((s, score))
 
     movers.sort(key=lambda x: x[1], reverse=True)
@@ -546,7 +551,7 @@ def momentum_candle_ok(last, direction: str) -> bool:
 
 def breakout_levels(df_exec, direction: str):
     """
-    Donchian breakout using PRIOR structure (shift(1)) so we don't “include” the breakout candle itself.
+    Donchian breakout using PRIOR structure (shift(1)) so breakout candle isn't included in the level.
     """
     if len(df_exec) < STRUCT_LOOKBACK + 5:
         return None
@@ -572,12 +577,12 @@ def breakout_levels(df_exec, direction: str):
 
 def vol_expansion_ok(df) -> bool:
     """
-    Strategy #3 core: expansion + (optional) prior compression.
+    Strategy #3: expansion + (optional) compression.
     Requires:
     - ATR expansion vs baseline
     - Candle range expansion vs baseline
     - Volume expansion vs baseline
-    - Optional squeeze filter via Bollinger width
+    - Optional squeeze via Bollinger width
     """
     last = df.iloc[-1]
     needed = ["atr", "atr_base", "volume", "vol_sma", "range", "range_sma", "bb_width", "bb_width_sma"]
@@ -637,14 +642,14 @@ def choose_entry(direction: str, last_exec, break_level: float) -> tuple:
     blended = (PULLBACK_ENTRY_BLEND * float(break_level)) + ((1.0 - PULLBACK_ENTRY_BLEND) * float(ema_fast))
 
     if direction == "LONG":
-        entry = min(blended, price)          # don't set above current
-        entry = max(entry, float(break_level))  # don't set below break
+        entry = min(blended, price)
+        entry = max(entry, float(break_level))
         return ("PULLBACK", float(entry))
 
-    entry = max(blended, price)  # short pullback is above current
+    entry = max(blended, price)
     cap = float(price) * (1.0 + SHORT_PULLBACK_CAP_PCT)
     entry = min(entry, cap)
-    entry = max(entry, float(break_level))  # keep it at/above break
+    entry = max(entry, float(break_level))
     return ("PULLBACK", float(entry))
 
 # ======================================================
@@ -696,7 +701,10 @@ def recommended_position_size(entry: float, stop: float, leverage: int):
     stop_pct = (stop_dist / entry) * 100.0
     risk_usdt = ACCOUNT_USDT * (RISK_PCT_PER_TRADE / 100.0)
 
+    # Notional such that loss at stop ~= risk_usdt
     notional = risk_usdt * (entry / stop_dist)
+
+    # Clamp notional
     notional = max(MIN_NOTIONAL_USDT, min(notional, MAX_NOTIONAL_USDT))
 
     margin = notional / max(leverage, 1)
@@ -834,21 +842,6 @@ def tracker_loop():
                 if not ex:
                     continue
 
-                # Pending expiry (avoid endless pending)
-                if t.get("status") == "PENDING":
-                    created_ts = int(t.get("created_ts") or 0)
-                    if created_ts and (time.time() - created_ts) > PENDING_EXPIRY_SECS:
-                        send_telegram(
-                            f"🟨 LIMIT EXPIRED (no fill)\n\n"
-                            f"Pair: {t['symbol']} ({t['ex_name']})\n"
-                            f"Side: {t['direction']}\n"
-                            f"Entry: {t['entry']}\n"
-                            f"Age: {format_duration(int(time.time() - created_ts))}"
-                        )
-                        with open_trades_lock:
-                            open_trades.pop(k, None)
-                        continue
-
                 ticker = ex.fetch_ticker(t["symbol"])
                 last_price = float(ticker.get("last") or ticker.get("close") or 0)
                 if last_price <= 0:
@@ -859,9 +852,22 @@ def tracker_loop():
                 leverage = int(t["leverage"])
 
                 # -------------------------
-                # PENDING: wait for fill
+                # PENDING: expiry + wait for fill
                 # -------------------------
                 if t.get("status") == "PENDING":
+                    created_ts = int(t.get("created_ts") or 0)
+                    if created_ts and (time.time() - created_ts) > PENDING_EXPIRY_SECS:
+                        send_telegram(
+                            f"🟨 LIMIT EXPIRED (no fill)\n\n"
+                            f"Pair: {t['symbol']} ({t['ex_name']})\n"
+                            f"Side: {direction}\n"
+                            f"Entry: {entry}\n"
+                            f"Age: {format_duration(int(time.time() - created_ts))}"
+                        )
+                        with open_trades_lock:
+                            open_trades.pop(k, None)
+                        continue
+
                     filled = (last_price <= entry) if direction == "LONG" else (last_price >= entry)
                     if filled:
                         t["status"] = "ACTIVE"
@@ -988,15 +994,9 @@ def scanner_loop():
                     if df_exec is None or df_confirm is None or df_regime is None:
                         continue
 
-                    # No-chop / trend quality filter
+                    # No-chop / quality filter
                     ema_ok = ema_separation_ok(df_confirm)
                     if not ema_ok:
-                        continue
-
-                    # Breakout must be present first (structure)
-                    last_exec = df_exec.iloc[-1]
-                    atr = float(last_exec.get("atr") or 0.0)
-                    if atr <= 0 or pd.isna(atr):
                         continue
 
                     # Expansion gates (Strategy #3 core)
@@ -1009,6 +1009,11 @@ def scanner_loop():
                         confirm_exp_ok = vol_expansion_ok(df_confirm)
                         if not confirm_exp_ok:
                             continue
+
+                    last_exec = df_exec.iloc[-1]
+                    atr = float(last_exec.get("atr") or 0.0)
+                    if atr <= 0 or pd.isna(atr):
+                        continue
 
                     # LONG
                     if trend_long(df_exec, df_confirm, df_regime):
