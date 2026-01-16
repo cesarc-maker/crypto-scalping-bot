@@ -1,10 +1,9 @@
 # ======================================================
-# FUTURES SCALP ELITE — QUICK PROFIT SIGNAL BOT (INFO ONLY)
-# OKX + KUCOIN FUTURES • TOP MOVERS • 3-TF MICRO TREND
-# SCALP SETUP: VWAP/EMA PULLBACK + RSI RESET + MOMENTUM RECLAIM
-# TIGHT STOPS • FAST TPs • TIME-BASED EXIT • STOP-PENALTY COOLDOWN
-# TP/SL TRACKING • POSITION SIZING (INFO)
-# SAME STRUCTURE AS YOUR FIRST BOT (Render-ready)
+# FUTURES SCALP ELITE — HIGH HIT-RATE BOT (INFO ONLY)
+# OKX + KUCOIN FUTURES • TOP MOVERS • 3-TF FILTER
+# MEAN REVERSION: EXTREME AWAY FROM VWAP + BB + RSI, RE-ENTRY CANDLE
+# HIGH HIT-RATE TARGETS (SMALL) • TIGHT INVALIDATION
+# TIME-BASED EXIT • STOP-PENALTY COOLDOWN • TP/SL TRACKING • POSITION SIZING (INFO)
 #
 # ⚠️ INFO ONLY. NOT FINANCIAL ADVICE. NO EXECUTION.
 # ======================================================
@@ -27,7 +26,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-log = logging.getLogger("FUTURES_SCALP_ELITE")
+log = logging.getLogger("FUTURES_SCALP_HITRATE")
 
 # ======================================================
 # CONFIG
@@ -55,85 +54,82 @@ CHAT_IDS = list(CHAT_IDS)
 PORT = int(os.getenv("PORT", 10000))
 
 # Cadence
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 12))        # seconds
-TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 6))       # seconds
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 10))
+TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 5))
 
 # Universe size and mover selection
-PAIR_LIMIT = int(os.getenv("PAIR_LIMIT", 140))
-TOP_MOVER_COUNT = int(os.getenv("TOP_MOVER_COUNT", 16))
+PAIR_LIMIT = int(os.getenv("PAIR_LIMIT", 160))
+TOP_MOVER_COUNT = int(os.getenv("TOP_MOVER_COUNT", 18))
 
 # Cooldowns
-WINDOW = int(os.getenv("WINDOW", 900))  # 15 min default (scalp = faster recycling)
-STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 3600))  # 1h default
+WINDOW = int(os.getenv("WINDOW", 900))  # 15 min
+STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 3600))  # 1h
 
-# Exchanges (OKX + KuCoin Futures)
+# Exchanges
 EXCHANGES = os.getenv("EXCHANGES", "okx,kucoin_futures").split(",")
 EXCHANGES = [e.strip() for e in EXCHANGES if e.strip()]
-EXCHANGES = [e for e in EXCHANGES if e in ("okx", "kucoin_futures")]  # hard clamp
+EXCHANGES = [e for e in EXCHANGES if e in ("okx", "kucoin_futures")]
 
 # Timeframes (scalp)
 TF_EXEC = os.getenv("TF_EXEC", "1m")        # entries
-TF_CONFIRM = os.getenv("TF_CONFIRM", "5m")  # micro-trend
-TF_REGIME = os.getenv("TF_REGIME", "15m")   # broader context
+TF_CONFIRM = os.getenv("TF_CONFIRM", "5m")  # filter
+TF_REGIME = os.getenv("TF_REGIME", "15m")   # regime
 
-# Trend alignment (EMA stack)
-EMA_FAST = int(os.getenv("EMA_FAST", 9))
-EMA_MID = int(os.getenv("EMA_MID", 20))
-EMA_SLOW = int(os.getenv("EMA_SLOW", 50))
+# Liquidity/spread filters (scalps need tight)
+MIN_QUOTE_VOL_USDT = float(os.getenv("MIN_QUOTE_VOL_USDT", 8_000_000))
+MAX_SPREAD_BPS = float(os.getenv("MAX_SPREAD_BPS", 15))
+ALLOW_ONLY_ACTIVE = os.getenv("ALLOW_ONLY_ACTIVE", "1") == "1"
 
-# VWAP / RSI / ATR
+# Indicators
+EMA_LEN = int(os.getenv("EMA_LEN", 20))
 RSI_LEN = int(os.getenv("RSI_LEN", 14))
 ATR_LEN = int(os.getenv("ATR_LEN", 14))
 
-# Scalp quality filters
-MIN_QUOTE_VOL_USDT = float(os.getenv("MIN_QUOTE_VOL_USDT", 8_000_000))  # lower than swing bot
-MAX_SPREAD_BPS = float(os.getenv("MAX_SPREAD_BPS", 18))                  # tighter spread for scalps
-ALLOW_ONLY_ACTIVE = os.getenv("ALLOW_ONLY_ACTIVE", "1") == "1"
+# Mean reversion thresholds
+VWAP_DEV_PCT = float(os.getenv("VWAP_DEV_PCT", 0.006))     # 0.60% away from VWAP = extreme
+BB_LEN = int(os.getenv("BB_LEN", 20))
+BB_STD = float(os.getenv("BB_STD", 2.0))
+REQUIRE_BB_TAG = os.getenv("REQUIRE_BB_TAG", "1") == "1"
 
-# "Top movers" for scalps: focus on pairs moving NOW
-MOVER_LOOKBACK_BARS = int(os.getenv("MOVER_LOOKBACK_BARS", 12))  # on TF_CONFIRM (e.g., 12 bars of 5m = 1h)
-MOVER_MIN_ABS_PCT = float(os.getenv("MOVER_MIN_ABS_PCT", 0.8))    # at least ~0.8% move over lookback to be interesting
+RSI_LONG_MAX = float(os.getenv("RSI_LONG_MAX", 30))  # oversold for LONG
+RSI_SHORT_MIN = float(os.getenv("RSI_SHORT_MIN", 70)) # overbought for SHORT
 
-# Entry logic: pullback + reclaim
-PULLBACK_MAX_DIST_EMA20_PCT = float(os.getenv("PULLBACK_MAX_DIST_EMA20_PCT", 0.004))  # 0.40% max from EMA20 for pullback area
-RECLAIM_BUFFER_PCT = float(os.getenv("RECLAIM_BUFFER_PCT", 0.0006))                   # 0.06% reclaim buffer
-RSI_LONG_MAX = float(os.getenv("RSI_LONG_MAX", 55))     # pullback RSI should reset <= 55 in uptrend
-RSI_SHORT_MIN = float(os.getenv("RSI_SHORT_MIN", 45))   # pullback RSI should reset >= 45 in downtrend
+# Regime filter (avoid fading strong trends)
+ADX_LEN = int(os.getenv("ADX_LEN", 14))
+ADX_MAX = float(os.getenv("ADX_MAX", 18))  # only fade if ADX is low-ish (range)
 
-# Momentum candle (loose; scalp needs frequency)
-BODY_PCT = float(os.getenv("BODY_PCT", 0.45))
-MAX_WICK_FRAC = float(os.getenv("MAX_WICK_FRAC", 0.55))
+# Entry confirmation: require re-entry candle back inside BB
+REENTRY_REQUIRED = os.getenv("REENTRY_REQUIRED", "1") == "1"
 
 # Risk model (tight)
-STOP_ATR_MULT = float(os.getenv("STOP_ATR_MULT", 0.9))  # tighter than swing bot
-STOP_MIN_PCT = float(os.getenv("STOP_MIN_PCT", 0.20))
-STOP_MAX_PCT = float(os.getenv("STOP_MAX_PCT", 0.60))
+STOP_ATR_MULT = float(os.getenv("STOP_ATR_MULT", 0.8))
+STOP_MIN_PCT = float(os.getenv("STOP_MIN_PCT", 0.18))
+STOP_MAX_PCT = float(os.getenv("STOP_MAX_PCT", 0.55))
 
-# Leverage mapping (informational)
-LEV_TIGHT = int(os.getenv("LEV_TIGHT", 50))
-LEV_NORMAL = int(os.getenv("LEV_NORMAL", 25))
-LEV_TIGHT_STOP_PCT = float(os.getenv("LEV_TIGHT_STOP_PCT", 0.40))
+# Leverage (info)
+LEV_TIGHT = int(os.getenv("LEV_TIGHT", 45))
+LEV_NORMAL = int(os.getenv("LEV_NORMAL", 20))
+LEV_TIGHT_STOP_PCT = float(os.getenv("LEV_TIGHT_STOP_PCT", 0.35))
 
-# Fast TP model (R-based, smaller targets)
-TP_ALLOCS = [50, 30, 20]
-TP_RATIOS_RAW = os.getenv("TP_RATIOS", "0.6,1.0,1.4")  # scalp-style
+# TP allocations (high hit-rate: small TP1/TP2)
+TP_ALLOCS = [60, 25, 15]
+TP_RATIOS_RAW = os.getenv("TP_RATIOS", "0.35,0.60,0.90")  # small R targets
 TP_RATIOS = [float(x.strip()) for x in TP_RATIOS_RAW.split(",") if x.strip()]
 if len(TP_RATIOS) != 3:
-    TP_RATIOS = [0.6, 1.0, 1.4]
+    TP_RATIOS = [0.35, 0.60, 0.90]
 
-# Time-based exit (scalp reality)
-MAX_TRADE_LIFETIME_SECS = int(os.getenv("MAX_TRADE_LIFETIME_SECS", 20 * 60))  # 20 minutes
+# Time-based exit
+MAX_TRADE_LIFETIME_SECS = int(os.getenv("MAX_TRADE_LIFETIME_SECS", 15 * 60))  # 15 min
 
-# Position sizing (informational only)
+# Position sizing (info)
 ACCOUNT_USDT = float(os.getenv("ACCOUNT_USDT", 1000))
-RISK_PCT_PER_TRADE = float(os.getenv("RISK_PCT_PER_TRADE", 0.4))
+RISK_PCT_PER_TRADE = float(os.getenv("RISK_PCT_PER_TRADE", 0.35))
 MAX_NOTIONAL_USDT = float(os.getenv("MAX_NOTIONAL_USDT", 5000))
 MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 25))
 
-# Pullback entry mode (scalp-friendly: default ON)
-USE_PULLBACK_MODE = os.getenv("USE_PULLBACK_MODE", "1") == "1"
-PULLBACK_ENTRY_BLEND = float(os.getenv("PULLBACK_ENTRY_BLEND", 0.65))  # lean toward reclaim level
-PENDING_EXPIRY_SECS = int(os.getenv("PENDING_EXPIRY_SECS", 60 * 60))    # 1h max pending
+# Pending expiry
+USE_PULLBACK_MODE = os.getenv("USE_PULLBACK_MODE", "0") == "1"  # mean reversion usually enters NOW
+PENDING_EXPIRY_SECS = int(os.getenv("PENDING_EXPIRY_SECS", 45 * 60))
 
 # ======================================================
 # STATE
@@ -175,20 +171,17 @@ def send_telegram(text: str):
 def send_startup():
     r1, r2, r3 = TP_RATIOS
     msg = (
-        "⚡ FUTURES SCALP ELITE (INFO ONLY)\n\n"
-        "Style: Micro-trend pullback + reclaim (scalp)\n"
+        "✅ FUTURES SCALP — HIGH HIT-RATE (INFO ONLY)\n\n"
+        "Style: VWAP mean reversion in low-trend regime\n"
         f"TFs: {TF_EXEC} / {TF_CONFIRM} / {TF_REGIME}\n"
-        f"Trend: EMA{EMA_FAST}/{EMA_MID}/{EMA_SLOW}\n"
-        f"Filters: spread≤{MAX_SPREAD_BPS}bps | 24h qv≥{MIN_QUOTE_VOL_USDT/1e6:.0f}M\n"
-        f"Pullback: dist≤{PULLBACK_MAX_DIST_EMA20_PCT*100:.2f}% from EMA{EMA_MID} | reclaim buf {RECLAIM_BUFFER_PCT*100:.2f}%\n"
-        f"RSI reset: long≤{RSI_LONG_MAX} | short≥{RSI_SHORT_MIN}\n"
+        f"Extreme: |price−VWAP| ≥ {VWAP_DEV_PCT*100:.2f}%\n"
+        f"BB tag req: {REQUIRE_BB_TAG} | RSI: long≤{RSI_LONG_MAX} short≥{RSI_SHORT_MIN}\n"
+        f"Regime: ADX({ADX_LEN}) ≤ {ADX_MAX}\n"
         f"Stop: {STOP_ATR_MULT}×ATR | window {STOP_MIN_PCT:.2f}%–{STOP_MAX_PCT:.2f}%\n"
         f"TP ratios (R): 1:{r1:g} / 1:{r2:g} / 1:{r3:g} | splits {TP_ALLOCS[0]}/{TP_ALLOCS[1]}/{TP_ALLOCS[2]}\n"
         f"Max trade time: {MAX_TRADE_LIFETIME_SECS//60} min\n"
-        f"Cooldown: {WINDOW}s | Stop-penalty: {STOP_PENALTY_WINDOW}s\n"
-        f"Position sizing (info): acct={ACCOUNT_USDT:.0f} USDT | risk={RISK_PCT_PER_TRADE:.2f}%\n\n"
-        f"Exchanges: {', '.join(EXCHANGES)}\n"
-        f"Scan: {SCAN_INTERVAL}s | Track: {TRACK_INTERVAL}s\n\n"
+        f"Filters: spread≤{MAX_SPREAD_BPS}bps | 24h qv≥{MIN_QUOTE_VOL_USDT/1e6:.0f}M\n"
+        f"Exchanges: {', '.join(EXCHANGES)}\n\n"
         "⚠️ Info only. Not financial advice."
     )
     send_telegram(msg)
@@ -236,11 +229,34 @@ def _rsi(series: pd.Series, length: int) -> pd.Series:
     rs = gain / (loss + 1e-12)
     return 100 - (100 / (1 + rs))
 
+def _adx(df: pd.DataFrame, length: int) -> pd.Series:
+    # classic ADX
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+    prev_close = close.shift(1)
+    tr1 = (high - low)
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    atr = tr.rolling(length).mean()
+    plus_di = 100 * (plus_dm.rolling(length).mean() / (atr + 1e-12))
+    minus_di = 100 * (minus_dm.rolling(length).mean() / (atr + 1e-12))
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-12)) * 100
+    adx = dx.rolling(length).mean()
+    return adx
+
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    # EMAs
-    df["ema_fast"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
-    df["ema_mid"]  = df["close"].ewm(span=EMA_MID, adjust=False).mean()
-    df["ema_slow"] = df["close"].ewm(span=EMA_SLOW, adjust=False).mean()
+    # EMA
+    df["ema"] = df["close"].ewm(span=EMA_LEN, adjust=False).mean()
 
     # Volume baseline
     df["vol_sma"] = df["volume"].rolling(20).mean()
@@ -259,17 +275,27 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # RSI
     df["rsi"] = _rsi(df["close"], RSI_LEN)
 
-    # VWAP (sessionless approximation: rolling VWAP over 50 bars on TF_EXEC / TF_CONFIRM)
-    vwap_len = 50
+    # Bollinger Bands
+    mid = df["close"].rolling(BB_LEN).mean()
+    sd = df["close"].rolling(BB_LEN).std()
+    df["bb_mid"] = mid
+    df["bb_up"] = mid + BB_STD * sd
+    df["bb_dn"] = mid - BB_STD * sd
+
+    # Rolling VWAP (approx)
+    vwap_len = 60
     tp = (df["high"] + df["low"] + df["close"]) / 3.0
     pv = tp * df["volume"]
     df["vwap"] = pv.rolling(vwap_len).sum() / (df["volume"].rolling(vwap_len).sum() + 1e-12)
+
+    # ADX
+    df["adx"] = _adx(df, ADX_LEN)
 
     return df
 
 def get_df(ex, symbol: str, tf: str):
     try:
-        data = ex.fetch_ohlcv(symbol, tf, limit=220)
+        data = ex.fetch_ohlcv(symbol, tf, limit=240)
         df = pd.DataFrame(data, columns=["ts","open","high","low","close","volume"])
         return add_indicators(df)
     except Exception as e:
@@ -330,9 +356,6 @@ def build_quality_universe(ex) -> list:
         if m.get("quote") != "USDT":
             continue
 
-        if "linear" in m and m.get("linear") is False:
-            continue
-
         last = t.get("last") or t.get("close")
         if not last:
             continue
@@ -380,129 +403,81 @@ def build_quality_universe(ex) -> list:
     return [s for s, _ in out[:PAIR_LIMIT]]
 
 # ======================================================
-# TOP MOVERS (scalp-oriented)
+# TOP MOVERS (keep only active/liquid; mean reversion works best with action)
 # ======================================================
 
 def detect_top_movers(ex):
-    """
-    For scalps, we want coins moving right now (intrahour) with liquidity/spread filters already applied.
-    We score using TF_CONFIRM close-to-close change over MOVER_LOOKBACK_BARS + volume ratio.
-    """
     movers = []
     pairs = build_quality_universe(ex)
-
     for s in pairs:
         df = get_df(ex, s, TF_CONFIRM)
-        if df is None or len(df) < max(50, MOVER_LOOKBACK_BARS + 10):
+        if df is None or len(df) < 80:
             continue
-
-        base = df["close"].iloc[-(MOVER_LOOKBACK_BARS + 1)]
+        # use absolute move over last 30 mins (6 bars of 5m)
+        base = df["close"].iloc[-7]
         last = df["close"].iloc[-1]
         if base <= 0:
             continue
-
-        pct_change = (last - base) / base * 100.0
-        abs_change = abs(pct_change)
-
-        # require some movement to be worth scalping
-        if abs_change < MOVER_MIN_ABS_PCT:
-            continue
-
+        abs_pct = abs((last - base) / base * 100.0)
         vol_ratio = float(df["volume"].iloc[-1]) / (float(df["vol_sma"].iloc[-1]) + 1e-9)
-        score = abs_change * 0.65 + vol_ratio * 0.35
+        score = abs_pct * 0.7 + vol_ratio * 0.3
         movers.append((s, score))
-
     movers.sort(key=lambda x: x[1], reverse=True)
     return [m[0] for m in movers[:TOP_MOVER_COUNT]]
 
 # ======================================================
-# CORE STRATEGY (Scalp)
+# CORE STRATEGY (High hit-rate mean reversion)
 # ======================================================
 
-def trend_long(df_exec, df_confirm, df_regime) -> bool:
-    return (
-        df_confirm["ema_fast"].iloc[-1] > df_confirm["ema_mid"].iloc[-1] > df_confirm["ema_slow"].iloc[-1] and
-        df_regime["ema_fast"].iloc[-1] > df_regime["ema_mid"].iloc[-1] > df_regime["ema_slow"].iloc[-1]
-    )
+def regime_ok(df_regime) -> bool:
+    last = df_regime.iloc[-1]
+    adx = float(last["adx"])
+    return (not pd.isna(adx)) and adx <= ADX_MAX
 
-def trend_short(df_exec, df_confirm, df_regime) -> bool:
-    return (
-        df_confirm["ema_fast"].iloc[-1] < df_confirm["ema_mid"].iloc[-1] < df_confirm["ema_slow"].iloc[-1] and
-        df_regime["ema_fast"].iloc[-1] < df_regime["ema_mid"].iloc[-1] < df_regime["ema_slow"].iloc[-1]
-    )
-
-def momentum_candle_ok(last, direction: str) -> bool:
-    rng = float(last["range"])
-    if pd.isna(rng) or rng <= 0:
+def extreme_long(df_exec) -> bool:
+    last = df_exec.iloc[-1]
+    price = float(last["close"])
+    vwap = float(last["vwap"])
+    if vwap <= 0:
         return False
-
-    o = float(last["open"])
-    c = float(last["close"])
-    h = float(last["high"])
-    l = float(last["low"])
-
-    if direction == "LONG":
-        body = c - o
-        if body <= 0 or body < BODY_PCT * rng:
+    dev = (vwap - price) / vwap  # positive when below vwap
+    if dev < VWAP_DEV_PCT:
+        return False
+    if float(last["rsi"]) > RSI_LONG_MAX:
+        return False
+    if REQUIRE_BB_TAG:
+        if price > float(last["bb_dn"]):
             return False
-        # cap rejection wick
-        upper_wick = h - c
-        if upper_wick > MAX_WICK_FRAC * rng:
-            return False
-        return True
-
-    body = o - c
-    if body <= 0 or body < BODY_PCT * rng:
-        return False
-    lower_wick = c - l
-    if lower_wick > MAX_WICK_FRAC * rng:
-        return False
+        if REENTRY_REQUIRED:
+            # require re-entry candle: current close back above bb_dn
+            prev = df_exec.iloc[-2]
+            if float(prev["close"]) <= float(prev["bb_dn"]) and price <= float(last["bb_dn"]):
+                return False
     return True
 
-def pullback_zone_ok(last_exec, direction: str) -> bool:
-    price = float(last_exec["close"])
-    ema20 = float(last_exec["ema_mid"])
-    if ema20 <= 0:
+def extreme_short(df_exec) -> bool:
+    last = df_exec.iloc[-1]
+    price = float(last["close"])
+    vwap = float(last["vwap"])
+    if vwap <= 0:
         return False
-    dist = abs(price - ema20) / ema20
-    return dist <= PULLBACK_MAX_DIST_EMA20_PCT
-
-def reclaim_trigger(last_exec, direction: str) -> float:
-    """
-    Reclaim = price recovers above VWAP+buffer (long) or below VWAP-buffer (short)
-    Returns reclaim_level for reference (not guaranteed fill).
-    """
-    vwap = float(last_exec["vwap"])
-    if direction == "LONG":
-        return vwap * (1.0 + RECLAIM_BUFFER_PCT)
-    return vwap * (1.0 - RECLAIM_BUFFER_PCT)
-
-def rsi_reset_ok(last_exec, direction: str) -> bool:
-    rsi = float(last_exec["rsi"])
-    if pd.isna(rsi):
+    dev = (price - vwap) / vwap  # positive when above vwap
+    if dev < VWAP_DEV_PCT:
         return False
-    if direction == "LONG":
-        return rsi <= RSI_LONG_MAX
-    return rsi >= RSI_SHORT_MIN
+    if float(last["rsi"]) < RSI_SHORT_MIN:
+        return False
+    if REQUIRE_BB_TAG:
+        if price < float(last["bb_up"]):
+            return False
+        if REENTRY_REQUIRED:
+            prev = df_exec.iloc[-2]
+            if float(prev["close"]) >= float(prev["bb_up"]) and price >= float(last["bb_up"]):
+                return False
+    return True
 
-def choose_entry(direction: str, last_exec, reclaim_level: float) -> tuple:
-    """
-    Scalp logic:
-    - If pullback mode ON: set a PULLBACK limit around reclaim_level blended with EMA20
-    - Otherwise: NOW at close
-    """
-    price = float(last_exec["close"])
-    ema20 = float(last_exec["ema_mid"])
-    if pd.isna(ema20) or ema20 <= 0 or not USE_PULLBACK_MODE:
-        return ("NOW", price)
-
-    blended = (PULLBACK_ENTRY_BLEND * float(reclaim_level)) + ((1.0 - PULLBACK_ENTRY_BLEND) * float(ema20))
-
-    if direction == "LONG":
-        entry = min(blended, price)
-        return ("PULLBACK", float(entry))
-    entry = max(blended, price)
-    return ("PULLBACK", float(entry))
+def choose_entry(direction: str, last_exec, vwap: float) -> tuple:
+    # Mean reversion: enter NOW; you want the bounce, not a missed limit
+    return ("NOW", float(last_exec["close"]))
 
 # ======================================================
 # TRACKING + REPORTING HELPERS
@@ -548,7 +523,6 @@ def recommended_position_size(entry: float, stop: float, leverage: int):
 
     notional = risk_usdt * (entry / stop_dist)
     notional = max(MIN_NOTIONAL_USDT, min(notional, MAX_NOTIONAL_USDT))
-
     margin = notional / max(leverage, 1)
     return float(notional), float(margin), float(risk_usdt), float(stop_pct)
 
@@ -556,8 +530,8 @@ def recommended_position_size(entry: float, stop: float, leverage: int):
 # SIGNAL BUILDER + REGISTER FOR TRACKING
 # ======================================================
 
-def build_trade(ex_name: str, symbol: str, direction: str, entry_price: float, atr: float,
-                entry_type: str, reclaim_level: float):
+def build_trade(ex_name: str, symbol: str, direction: str, entry_price: float, atr: float, vwap_level: float):
+    # Stop beyond recent extreme using ATR (tight)
     stop = entry_price - STOP_ATR_MULT * atr if direction == "LONG" else entry_price + STOP_ATR_MULT * atr
     stop_pct = abs(entry_price - stop) / entry_price * 100.0 if entry_price > 0 else 999.0
 
@@ -565,7 +539,7 @@ def build_trade(ex_name: str, symbol: str, direction: str, entry_price: float, a
         return None
 
     leverage = LEV_TIGHT if stop_pct < LEV_TIGHT_STOP_PCT else LEV_NORMAL
-    risk = "LOW" if leverage >= 45 else "MEDIUM"
+    risk = "LOW" if leverage >= 40 else "MEDIUM"
 
     tps = build_r_based_tps(entry_price, stop, direction)
     if not tps:
@@ -577,28 +551,26 @@ def build_trade(ex_name: str, symbol: str, direction: str, entry_price: float, a
         "symbol": symbol,
         "direction": direction,
         "entry": float(entry_price),
-        "reclaim_level": float(reclaim_level),
+        "vwap": float(vwap_level),
         "stop": float(stop),
         "tps": [float(tps[0]), float(tps[1]), float(tps[2])],
         "tp_allocs": TP_ALLOCS[:],
         "tp_hits": [False, False, False],
         "leverage": int(leverage),
         "risk": risk,
-        "entry_type": entry_type,  # NOW / PULLBACK
-        "status": "ACTIVE" if entry_type == "NOW" else "PENDING",
+        "entry_type": "NOW",
+        "status": "ACTIVE",
         "created_ts": now,
-        "start_ts": now if entry_type == "NOW" else None,
-        "filled_ts": now if entry_type == "NOW" else None,
+        "start_ts": now,
+        "filled_ts": now,
         "realized_pct": 0.0,
     }
 
 def send_signal(trade: dict):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    direction = trade["direction"]
-    entry_type = trade["entry_type"]
-    status = trade["status"]
 
-    header = "⚡ SCALP " + direction + (" (A+) ENTER NOW" if entry_type == "NOW" else " (A) PULLBACK LIMIT")
+    direction = trade["direction"]
+    header = "🎯 HIGH HIT-RATE SCALP " + direction + " (MEAN REVERSION)"
 
     pos = recommended_position_size(trade["entry"], trade["stop"], trade["leverage"])
     if pos:
@@ -618,7 +590,7 @@ def send_signal(trade: dict):
         f"Exchange: {trade['ex_name']}\n"
         f"Pair: {trade['symbol']}\n"
         f"Entry: {round(trade['entry'], 6)}\n"
-        f"Reclaim lvl: {round(trade['reclaim_level'], 6)}\n"
+        f"VWAP: {round(trade['vwap'], 6)}\n"
         f"Stop: {round(trade['stop'], 6)} ({stop_pct:.2f}%)\n\n"
         f"TP1: {round(tp1, 6)} ({TP_ALLOCS[0]}%)\n"
         f"TP2: {round(tp2, 6)} ({TP_ALLOCS[1]}%)\n"
@@ -626,7 +598,6 @@ def send_signal(trade: dict):
         f"RR targets (R): 1:{r1:g} / 1:{r2:g} / 1:{r3:g}\n"
         f"Leverage (info): {trade['leverage']}x\n"
         f"Risk Level: {trade['risk']}\n"
-        f"Status: {status}\n"
         f"Max lifetime: {MAX_TRADE_LIFETIME_SECS//60} min\n\n"
         f"Position (info): {notional:.0f} USDT notional | Margin {margin:.1f} USDT\n"
         f"Risk (info): ~{risk_usdt:.2f} USDT (@{RISK_PCT_PER_TRADE:.2f}%)\n\n"
@@ -636,14 +607,14 @@ def send_signal(trade: dict):
     )
 
     send_telegram(msg)
-    log.info(f"Signal sent → {trade['ex_name']} {trade['symbol']} {direction} {entry_type}")
+    log.info(f"Signal sent → {trade['ex_name']} {trade['symbol']} {direction}")
 
     trade_key = f"{trade['ex_name']}|{trade['symbol']}|{direction}|{int(time.time())}"
     with open_trades_lock:
         open_trades[trade_key] = trade
 
 # ======================================================
-# TRACKER LOOP (handles PENDING fills + ACTIVE TP/SL)
+# TRACKER LOOP (ACTIVE TP/SL + TIME EXIT)
 # ======================================================
 
 def tracker_loop():
@@ -674,48 +645,10 @@ def tracker_loop():
                 entry = float(t["entry"])
                 leverage = int(t["leverage"])
 
-                # -------------------------
-                # PENDING: expiry + fill
-                # -------------------------
-                if t.get("status") == "PENDING":
-                    created_ts = int(t.get("created_ts") or 0)
-                    if created_ts and (time.time() - created_ts) > PENDING_EXPIRY_SECS:
-                        send_telegram(
-                            f"🟨 LIMIT EXPIRED (no fill)\n\n"
-                            f"Pair: {t['symbol']} ({t['ex_name']})\n"
-                            f"Side: {direction}\n"
-                            f"Entry: {entry}\n"
-                            f"Age: {format_duration(int(time.time() - created_ts))}"
-                        )
-                        with open_trades_lock:
-                            open_trades.pop(k, None)
-                        continue
-
-                    filled = (last_price <= entry) if direction == "LONG" else (last_price >= entry)
-                    if filled:
-                        t["status"] = "ACTIVE"
-                        t["filled_ts"] = int(time.time())
-                        t["start_ts"] = int(time.time())
-
-                        send_telegram(
-                            f"🟦 LIMIT FILLED\n\n"
-                            f"Pair: {t['symbol']} ({t['ex_name']})\n"
-                            f"Side: {direction}\n"
-                            f"Entry: {entry}\n"
-                            f"Fill Price: {last_price}"
-                        )
-                        with open_trades_lock:
-                            if k in open_trades:
-                                open_trades[k] = t
-                    continue
-
-                # -------------------------
-                # ACTIVE: time exit / stop / TP
-                # -------------------------
                 elapsed = int(time.time() - int(t["start_ts"]))
                 duration = format_duration(elapsed)
 
-                # Time-based exit (scalp: if it doesn't move, dump it)
+                # time exit
                 if elapsed >= MAX_TRADE_LIFETIME_SECS:
                     pnl = calc_profit_pct(entry, last_price, direction, leverage)
                     send_telegram(
@@ -749,6 +682,7 @@ def tracker_loop():
                         open_trades.pop(k, None)
                     continue
 
+                # TP hits
                 tps = t["tps"]
                 allocs = t.get("tp_allocs", TP_ALLOCS)
                 hit_any = False
@@ -808,10 +742,6 @@ def scanner_loop():
 
     while True:
         for ex_name in EXCHANGES:
-            ex_name = ex_name.strip()
-            if not ex_name:
-                continue
-
             ex = get_ex_cached(ex_name)
             if not ex:
                 continue
@@ -826,33 +756,31 @@ def scanner_loop():
                     if df_exec is None or df_confirm is None or df_regime is None:
                         continue
 
+                    if not regime_ok(df_regime):
+                        continue
+
                     last_exec = df_exec.iloc[-1]
                     atr = float(last_exec.get("atr") or 0.0)
                     if atr <= 0 or pd.isna(atr):
                         continue
 
-                    # LONG scalp: micro uptrend, pullback zone, RSI reset, reclaim VWAP, momentum candle
-                    if trend_long(df_exec, df_confirm, df_regime):
-                        if pullback_zone_ok(last_exec, "LONG") and rsi_reset_ok(last_exec, "LONG"):
-                            reclaim_lvl = reclaim_trigger(last_exec, "LONG")
-                            # confirm reclaim is "nearby" (avoid chasing far away)
-                            if float(last_exec["close"]) >= reclaim_lvl * (1.0 - 0.0015) and momentum_candle_ok(last_exec, "LONG"):
-                                if allow(ex_name, symbol, "LONG"):
-                                    entry_type, entry_price = choose_entry("LONG", last_exec, reclaim_lvl)
-                                    trade = build_trade(ex_name, symbol, "LONG", entry_price, atr, entry_type, reclaim_lvl)
-                                    if trade:
-                                        send_signal(trade)
+                    # LONG fade: extreme below vwap + RSI oversold (+ BB tag)
+                    if extreme_long(df_exec):
+                        if allow(ex_name, symbol, "LONG"):
+                            vwap_lvl = float(last_exec["vwap"])
+                            entry_type, entry_price = choose_entry("LONG", last_exec, vwap_lvl)
+                            trade = build_trade(ex_name, symbol, "LONG", entry_price, atr, vwap_lvl)
+                            if trade:
+                                send_signal(trade)
 
-                    # SHORT scalp: micro downtrend, pullback zone, RSI reset, reclaim VWAP down, momentum candle
-                    if trend_short(df_exec, df_confirm, df_regime):
-                        if pullback_zone_ok(last_exec, "SHORT") and rsi_reset_ok(last_exec, "SHORT"):
-                            reclaim_lvl = reclaim_trigger(last_exec, "SHORT")
-                            if float(last_exec["close"]) <= reclaim_lvl * (1.0 + 0.0015) and momentum_candle_ok(last_exec, "SHORT"):
-                                if allow(ex_name, symbol, "SHORT"):
-                                    entry_type, entry_price = choose_entry("SHORT", last_exec, reclaim_lvl)
-                                    trade = build_trade(ex_name, symbol, "SHORT", entry_price, atr, entry_type, reclaim_lvl)
-                                    if trade:
-                                        send_signal(trade)
+                    # SHORT fade: extreme above vwap + RSI overbought (+ BB tag)
+                    if extreme_short(df_exec):
+                        if allow(ex_name, symbol, "SHORT"):
+                            vwap_lvl = float(last_exec["vwap"])
+                            entry_type, entry_price = choose_entry("SHORT", last_exec, vwap_lvl)
+                            trade = build_trade(ex_name, symbol, "SHORT", entry_price, atr, vwap_lvl)
+                            if trade:
+                                send_signal(trade)
 
                 except Exception as e:
                     log.error(f"Scanner error {ex_name} {symbol}: {e}")
@@ -867,7 +795,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "FUTURES SCALP ELITE BOT RUNNING (INFO ONLY) — OKX + KUCOIN FUTURES"
+    return "FUTURES SCALP HIGH HIT-RATE BOT RUNNING (INFO ONLY) — OKX + KUCOIN FUTURES"
 
 if __name__ == "__main__":
     threading.Thread(target=scanner_loop, daemon=True).start()
