@@ -1,11 +1,11 @@
 # ======================================================
 # CRT FAST SIGNAL BOT (INFO ONLY)
-# OKX + KUCOIN FUTURES • FREQUENT SIGNALS ~ EVERY 2 MIN
+# OKX + KUCOIN FUTURES • FREQUENT SIGNALS
 # CONTEXT: 1h BULLISH STRUCTURE
 # TREND: 15m EMA TREND ALIGNMENT
-# EXECUTION: 2m ENTRY TRIGGERS (high-frequency)
+# EXECUTION: 1m ENTRY TRIGGERS (OKX SAFE)
 # ENTRY: EMA PULLBACK + VWAP RECLAIM + MOMENTUM CANDLE
-# STOP: ATR-based (2m) • TP: STRICT 1:1 ONLY (no partials)
+# STOP: ATR-based (1m) • TP: STRICT 1:1 ONLY (no partials)
 # COOLDOWNS + STOP PENALTY + TP/SL TRACKING + STATS AFTER 20 CLOSED
 #
 # ⚠️ INFO ONLY. NOT FINANCIAL ADVICE. NO EXECUTION.
@@ -30,7 +30,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-log = logging.getLogger("CRT_FAST_2MIN")
+log = logging.getLogger("CRT_FAST_1MIN")
 
 # ======================================================
 # CONFIG
@@ -57,7 +57,7 @@ CHAT_IDS = list(CHAT_IDS)
 PORT = int(os.getenv("PORT", 10000))
 
 # Cadence
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 10))   # scanner checks fast
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 10))
 TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 5))
 
 # Exchanges (ONLY OKX + KuCoin Futures)
@@ -73,9 +73,9 @@ MAX_SPREAD_BPS = float(os.getenv("MAX_SPREAD_BPS", 18))
 ALLOW_ONLY_ACTIVE = os.getenv("ALLOW_ONLY_ACTIVE", "1") == "1"
 
 # Timeframes
-TF_EXEC = os.getenv("TF_EXEC", "2m")     # frequent signals
-TF_TREND = os.getenv("TF_TREND", "15m")  # trend filter
-TF_CTX = os.getenv("TF_CTX", "1h")       # context filter
+TF_EXEC = os.getenv("TF_EXEC", "1m")     # ✅ OKX supports this
+TF_TREND = os.getenv("TF_TREND", "15m")
+TF_CTX = os.getenv("TF_CTX", "1h")
 
 # Trend indicators
 EMA_FAST = int(os.getenv("EMA_FAST", 9))
@@ -86,25 +86,19 @@ EMA_SLOW = int(os.getenv("EMA_SLOW", 50))
 ATR_LEN = int(os.getenv("ATR_LEN", 14))
 
 # Entry quality
-PULLBACK_TO_EMA20_PCT = float(os.getenv("PULLBACK_TO_EMA20_PCT", 0.0035))  # <=0.35% from EMA20
-VWAP_RECLAIM_BUFFER = float(os.getenv("VWAP_RECLAIM_BUFFER", 0.0005))      # 0.05%
+PULLBACK_TO_EMA20_PCT = float(os.getenv("PULLBACK_TO_EMA20_PCT", 0.0035))
+VWAP_RECLAIM_BUFFER = float(os.getenv("VWAP_RECLAIM_BUFFER", 0.0005))
 BODY_PCT = float(os.getenv("BODY_PCT", 0.45))
 
 # Stops + strict 1:1 TP
-STOP_ATR_MULT = float(os.getenv("STOP_ATR_MULT", 1.0))   # 2m ATR stop
+STOP_ATR_MULT = float(os.getenv("STOP_ATR_MULT", 1.0))
 STOP_MIN_PCT = float(os.getenv("STOP_MIN_PCT", 0.15))
 STOP_MAX_PCT = float(os.getenv("STOP_MAX_PCT", 0.55))
-RR = 1.0  # strict 1:1
+RR = 1.0
 
-# Cooldowns (we want frequent signals)
-WINDOW = int(os.getenv("WINDOW", 120))  # 2 min cooldown per symbol direction
-STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 1800))  # 30 min
-
-# Position sizing (INFO)
-ACCOUNT_USDT = float(os.getenv("ACCOUNT_USDT", 1000))
-RISK_PCT_PER_TRADE = float(os.getenv("RISK_PCT_PER_TRADE", 0.35))
-MAX_NOTIONAL_USDT = float(os.getenv("MAX_NOTIONAL_USDT", 5000))
-MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 25))
+# Cooldowns
+WINDOW = int(os.getenv("WINDOW", 120))
+STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 1800))
 
 # Stats
 STATS_BATCH_SIZE = int(os.getenv("STATS_BATCH_SIZE", 20))
@@ -153,12 +147,22 @@ def send_startup():
         f"TFs: EXEC={TF_EXEC} | TREND={TF_TREND} | CONTEXT={TF_CTX}\n"
         f"Trend: EMA{EMA_FAST}/{EMA_MID}/{EMA_SLOW}\n"
         f"Entry: EMA20 pullback + VWAP reclaim + bullish momentum candle\n"
-        f"Stop: {STOP_ATR_MULT}x ATR({ATR_LEN}) (2m) | TP: strict 1:1 only\n"
+        f"Stop: {STOP_ATR_MULT}x ATR({ATR_LEN}) (1m) | TP: strict 1:1 only\n"
         f"Cooldown: {WINDOW}s | Stop-penalty: {STOP_PENALTY_WINDOW}s\n"
         f"Exchanges: {', '.join(EXCHANGES)}\n\n"
         "⚠️ Info only. Not financial advice."
     )
     send_telegram(msg)
+
+# ======================================================
+# SAFE TF (prevents OKX bar errors)
+# ======================================================
+
+def safe_tf(ex_name: str, tf: str) -> str:
+    if ex_name == "okx":
+        if tf in ("2m", "3m"):
+            return "1m"
+    return tf
 
 # ======================================================
 # COOLDOWNS
@@ -214,8 +218,9 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["vol_sma"] = df["volume"].rolling(20).mean()
     return df
 
-def get_df(ex, symbol: str, tf: str) -> Optional[pd.DataFrame]:
+def get_df(ex, symbol: str, tf: str, ex_name: str) -> Optional[pd.DataFrame]:
     try:
+        tf = safe_tf(ex_name, tf)
         data = ex.fetch_ohlcv(symbol, tf, limit=220)
         df = pd.DataFrame(data, columns=["ts","open","high","low","close","volume"])
         return add_indicators(df)
@@ -306,14 +311,13 @@ def build_quality_universe(ex) -> list:
     out.sort(key=lambda x: x[1], reverse=True)
     return [s for s, _ in out[:PAIR_LIMIT]]
 
-def detect_top_movers(ex):
+def detect_top_movers(ex, ex_name: str):
     movers = []
     pairs = build_quality_universe(ex)
     for s in pairs:
-        df = get_df(ex, s, TF_TREND)
+        df = get_df(ex, s, TF_TREND, ex_name)
         if df is None or len(df) < 40:
             continue
-        # simple short term mover: last 3 bars (15m)
         base = float(df["close"].iloc[-4])
         last = float(df["close"].iloc[-1])
         if base <= 0:
@@ -324,7 +328,7 @@ def detect_top_movers(ex):
     return [m[0] for m in movers[:TOP_MOVER_COUNT]]
 
 # ======================================================
-# STRATEGY: frequent pullback continuation
+# STRATEGY
 # ======================================================
 
 def ctx_bullish(df_ctx) -> bool:
@@ -388,7 +392,7 @@ def build_trade(ex_name: str, symbol: str, entry: float, atr: float) -> Optional
 def send_signal(trade: Dict[str, Any]):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     msg = (
-        "📌 FAST LONG (2m) — STRICT 1:1 (INFO ONLY)\n\n"
+        "📌 FAST LONG (1m) — STRICT 1:1 (INFO ONLY)\n\n"
         f"Exchange: {trade['ex_name']}\n"
         f"Pair: {trade['symbol']}\n"
         f"Entry: {trade['entry']:.6f}\n"
@@ -427,6 +431,12 @@ def _record_closed(trade: Dict[str, Any], outcome: str, exit_price: float):
                 f"Losses: {losses} ({losses/total*100:.1f}%)\n\n"
                 "⚠️ Info only."
             )
+
+def apply_stop_penalty(ex_name: str, symbol: str, direction: str):
+    now = time.time()
+    key = _cd_key(ex_name, symbol, direction)
+    penalty_cooldowns[key] = now + STOP_PENALTY_WINDOW
+    recent_signals[key] = now
 
 def tracker_loop():
     log.info("Tracker loop started.")
@@ -484,13 +494,13 @@ def scanner_loop():
             if not ex:
                 continue
 
-            movers = detect_top_movers(ex)
+            movers = detect_top_movers(ex, ex_name)
 
             for symbol in movers:
                 try:
-                    df_exec = get_df(ex, symbol, TF_EXEC)
-                    df_trend = get_df(ex, symbol, TF_TREND)
-                    df_ctx = get_df(ex, symbol, TF_CTX)
+                    df_exec = get_df(ex, symbol, TF_EXEC, ex_name)
+                    df_trend = get_df(ex, symbol, TF_TREND, ex_name)
+                    df_ctx = get_df(ex, symbol, TF_CTX, ex_name)
 
                     if df_exec is None or df_trend is None or df_ctx is None:
                         continue
@@ -507,7 +517,6 @@ def scanner_loop():
                     if atr <= 0:
                         continue
 
-                    # entry trigger: pullback + vwap reclaim + bullish momentum candle
                     if pullback_ok(df_exec) and vwap_reclaim(df_exec) and momentum_bullish(df_exec):
                         if allow(ex_name, symbol, "LONG"):
                             entry = float(last_exec["close"])
