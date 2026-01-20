@@ -1,54 +1,16 @@
 # ======================================================
-# CRT 15-MINUTE STRATEGY BOT (INFO ONLY)
+# CRT 15-MINUTE STRATEGY BOT (INFO ONLY) — 3–5 SIGNALS/DAY TUNED
 # OKX + KUCOIN FUTURES • SAME STRUCTURE AS YOUR LAST BOT
 #
 # TF SETUP:
 # - EXECUTION: 15m (ALL entries/exits/validations happen on 15m only)
 # - CONTEXT:   1h (filter only)
 #
-# STRATEGY (YOUR SPEC):
-# 1) DEMAND ZONE (15m)
-#    - Strong bullish displacement after a base (consolidation / small bearish candles)
-#    - Zone Top: highest close before displacement
-#    - Zone Bottom: lowest wick in the base
-#    - Zone invalid if a 15m candle CLOSES below zone bottom
-#
-# 2) TAP (FIRST TAP ONLY)
-#    - Wick touches zone
-#    - Candle does NOT close below zone bottom
-#    - Must see a minimum reaction of 1R away after tap (R = zone_height = top-bottom)
-#
-# 3) PUMP (15m, 1–3 candles)
-#    - Bullish move of 5% to 6%
-#    - From: lowest low before pump -> highest high of pump
-#    - Must break previous minor high / internal liquidity (simple proxy: breaks prior N-high)
-#
-# 4) FIB
-#    - Fib from swing low (lowest low before pump) to swing high (highest high of pump)
-#    - Use 0.382 / 0.5 / 0.618
-#
-# 5) ENTRY (15m close)
-#    - Retrace into (Demand Zone AND Fib window 0.382–0.618)
-#    - Entry candle bullish AND closes ABOVE zone top
-#    - Entry at close of that confirmation candle
-#
-# 6) SL
-#    - STOP_METHOD=STRUCT  -> below zone bottom (lowest wick of zone)
-#    - STOP_METHOD=ATR     -> entry - 1x ATR(15m)
-#    (Use ONE consistently via env var)
-#
-# 7) TP: STRICT 1:1 ONLY
-#    - No partials, no scaling, full close at TP or SL
-#
-# 8) FILTERS
-#    - Only LONG, only if 1h bullish structure
-#    - No trades during NEWS_BLACKOUT_UTC windows (optional)
-#    - No trades during extremely low volume sessions (optional)
-#    - One trade per demand zone
-#
-# 9) TRACKING + STATS
-#    - TP/SL tracking loop
-#    - Win/Loss snapshot every 20 closed trades
+# TUNED FOR ~3–5 SIGNALS/DAY (MINIMAL LOOSENING, STILL CRT-STYLE):
+# - Pump widened: 4.5%–7.0% and up to 4 candles
+# - Demand displacement loosened a bit
+# - Base loosened a bit
+# - Wider universe + lower vol floor (helps KuCoin)
 #
 # ⚠️ INFO ONLY. NOT FINANCIAL ADVICE. NO EXECUTION.
 # ======================================================
@@ -69,7 +31,7 @@ from typing import Dict, Any, Optional, List, Tuple
 # ======================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("CRT_15M_STRATEGY")
+log = logging.getLogger("CRT_15M_TUNED_3_5")
 
 # ======================================================
 # CONFIG
@@ -104,33 +66,33 @@ EXCHANGES = os.getenv("EXCHANGES", "okx,kucoin_futures").split(",")
 EXCHANGES = [e.strip() for e in EXCHANGES if e.strip()]
 EXCHANGES = [e for e in EXCHANGES if e in ("okx", "kucoin_futures")]  # hard clamp
 
-# Universe
-PAIR_LIMIT = int(os.getenv("PAIR_LIMIT", 200))
-TOP_MOVER_COUNT = int(os.getenv("TOP_MOVER_COUNT", 25))
-MIN_QUOTE_VOL_USDT = float(os.getenv("MIN_QUOTE_VOL_USDT", 8_000_000))
+# Universe (TUNED wider)
+PAIR_LIMIT = int(os.getenv("PAIR_LIMIT", 260))
+TOP_MOVER_COUNT = int(os.getenv("TOP_MOVER_COUNT", 35))
+MIN_QUOTE_VOL_USDT = float(os.getenv("MIN_QUOTE_VOL_USDT", 5_000_000))
 MAX_SPREAD_BPS = float(os.getenv("MAX_SPREAD_BPS", 25))
 ALLOW_ONLY_ACTIVE = os.getenv("ALLOW_ONLY_ACTIVE", "1") == "1"
 
-# Timeframes (fixed to your spec)
+# Timeframes (fixed to spec)
 TF_EXEC = "15m"
 TF_CTX = "1h"
 
-# Demand Zone detection tuning
-BASE_LOOKBACK = int(os.getenv("BASE_LOOKBACK", 4))                # candles before impulse (base)
-BASE_MAX_BODY_PCT = float(os.getenv("BASE_MAX_BODY_PCT", 0.45))   # base should be small-ish bodies
-DISP_BODY_PCT_MIN = float(os.getenv("DISP_BODY_PCT_MIN", 0.60))   # displacement candle body >= 60% of range
+# Demand Zone detection tuning (TUNED)
+BASE_LOOKBACK = int(os.getenv("BASE_LOOKBACK", 5))                # was 4
+BASE_MAX_BODY_PCT = float(os.getenv("BASE_MAX_BODY_PCT", 0.55))   # was 0.45
+DISP_BODY_PCT_MIN = float(os.getenv("DISP_BODY_PCT_MIN", 0.55))   # was 0.60
 RANGE_SMA_LEN = int(os.getenv("RANGE_SMA_LEN", 20))
-DISP_RANGE_MULT = float(os.getenv("DISP_RANGE_MULT", 1.8))        # displacement range >= range_sma * mult
+DISP_RANGE_MULT = float(os.getenv("DISP_RANGE_MULT", 1.5))        # was 1.8
 
 # Tap + reaction
 FIRST_TAP_ONLY = True
-REACTION_R_MULT = float(os.getenv("REACTION_R_MULT", 1.0))         # must move >= 1R after tap (R=zone height)
+REACTION_R_MULT = float(os.getenv("REACTION_R_MULT", 1.0))        # keep 1R reaction requirement
 
-# Pump detection
-PUMP_MIN_PCT = float(os.getenv("PUMP_MIN_PCT", 5.0))
-PUMP_MAX_PCT = float(os.getenv("PUMP_MAX_PCT", 6.0))
-PUMP_MAX_CANDLES = int(os.getenv("PUMP_MAX_CANDLES", 3))           # 1–3 candles
-BREAK_LOOKBACK = int(os.getenv("BREAK_LOOKBACK", 20))              # "minor high" proxy window
+# Pump detection (TUNED)
+PUMP_MIN_PCT = float(os.getenv("PUMP_MIN_PCT", 4.5))              # was 5.0
+PUMP_MAX_PCT = float(os.getenv("PUMP_MAX_PCT", 7.0))              # was 6.0
+PUMP_MAX_CANDLES = int(os.getenv("PUMP_MAX_CANDLES", 4))          # was 3
+BREAK_LOOKBACK = int(os.getenv("BREAK_LOOKBACK", 20))
 
 # Fib window
 FIB_MIN = float(os.getenv("FIB_MIN", 0.382))
@@ -151,22 +113,17 @@ ATR_LEN = int(os.getenv("ATR_LEN", 14))
 RR = 1.0
 
 # Filters
-# 1h bullish structure (simple): EMA20 > EMA50 AND close > EMA20
 CTX_EMA_FAST = int(os.getenv("CTX_EMA_FAST", 20))
 CTX_EMA_SLOW = int(os.getenv("CTX_EMA_SLOW", 50))
 
-# Low volume filter (optional)
 ENABLE_LOW_VOL_FILTER = os.getenv("ENABLE_LOW_VOL_FILTER", "1") == "1"
-LOW_VOL_MULT = float(os.getenv("LOW_VOL_MULT", 0.7))               # last vol must be >= LOW_VOL_MULT * vol_sma
+LOW_VOL_MULT = float(os.getenv("LOW_VOL_MULT", 0.7))
 
-# News blackout windows (optional)
-# Example:
-# NEWS_BLACKOUT_UTC="2026-01-19T13:00/2026-01-19T15:00,2026-01-20T18:00/2026-01-20T19:00"
 NEWS_BLACKOUT_UTC = os.getenv("NEWS_BLACKOUT_UTC", "").strip()
 
-# Cooldowns (symbol+direction)
-WINDOW = int(os.getenv("WINDOW", 1800))                # general cooldown
-STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 7200))  # stop penalty
+# Cooldowns
+WINDOW = int(os.getenv("WINDOW", 1800))
+STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 7200))
 
 # Stats
 STATS_BATCH_SIZE = int(os.getenv("STATS_BATCH_SIZE", 20))
@@ -184,8 +141,7 @@ open_trades_lock = threading.Lock()
 closed_trades: List[Dict[str, Any]] = []
 stats_lock = threading.Lock()
 
-# Per-symbol setup state (zone/tap/reaction/pump/fib)
-symbol_state: Dict[str, Dict[str, Any]] = {}
+symbol_state: Dict[str, Dict[str, Any]] = {}  # zone/tap/reaction/pump/fib per ex|symbol
 
 # ======================================================
 # TELEGRAM
@@ -214,14 +170,14 @@ def send_telegram(text: str):
 
 def send_startup():
     msg = (
-        "🧠 CRT 15m Strategy Bot (INFO ONLY)\n\n"
+        "🧠 CRT 15m Strategy Bot (INFO ONLY) — tuned for ~3–5/day\n\n"
         "TFs: EXEC=15m (entries/exits only) | CONTEXT=1h (filter)\n"
         "Demand Zone: bullish displacement after base\n"
         "Tap: first tap only + must NOT close below zone + requires >=1R reaction\n"
         f"Pump: {PUMP_MIN_PCT:.1f}%–{PUMP_MAX_PCT:.1f}% in 1–{PUMP_MAX_CANDLES} (15m)\n"
-        f"Fib: 0.382/0.5/0.618 | Entry on bullish 15m close above zone top\n"
+        "Fib: 0.382/0.5/0.618 | Entry on bullish 15m close above zone top\n"
         f"Stop method: {STOP_METHOD} | TP: strict 1:1 only\n"
-        f"Filters: 1h bullish structure | low-vol={ENABLE_LOW_VOL_FILTER} | news_blackout={bool(NEWS_BLACKOUT_UTC)}\n\n"
+        f"Universe: pair_limit={PAIR_LIMIT} movers={TOP_MOVER_COUNT} qv≥{MIN_QUOTE_VOL_USDT/1e6:.1f}M\n\n"
         f"Exchanges: {', '.join(EXCHANGES)}\n\n"
         "⚠️ Info only. Not financial advice."
     )
@@ -453,13 +409,6 @@ def _candle_body_pct(row) -> float:
     return body / rng
 
 def detect_demand_zone(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    """
-    Demand Zone on 15m:
-    - last candle is bullish displacement (strong body + range expansion)
-    - base is the previous BASE_LOOKBACK candles
-    - zone top = highest close in base
-    - zone bottom = lowest wick (low) in base
-    """
     if len(df_15m) < (BASE_LOOKBACK + RANGE_SMA_LEN + 10):
         return None
 
@@ -476,18 +425,16 @@ def detect_demand_zone(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
     if float(disp["range"]) < float(disp["range_sma"]) * DISP_RANGE_MULT:
         return None
 
-    # base candles
     base_df = df_15m.iloc[i-BASE_LOOKBACK:i]
     if len(base_df) < BASE_LOOKBACK:
         return None
 
-    # base should be consolidation-ish / small-ish candles
     body_pcts = base_df.apply(_candle_body_pct, axis=1)
     if body_pcts.mean() > BASE_MAX_BODY_PCT:
         return None
 
-    zone_top = float(base_df["close"].max())   # highest close before displacement
-    zone_bottom = float(base_df["low"].min())  # lowest wick in base
+    zone_top = float(base_df["close"].max())
+    zone_bottom = float(base_df["low"].min())
     if zone_top <= zone_bottom:
         return None
 
@@ -497,19 +444,17 @@ def detect_demand_zone(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
         "bottom": zone_bottom,
         "tapped": False,
         "tap_ts": None,
-        "reacted": False,         # becomes True after >=1R reaction
-        "reaction_high": None,    # track max high after tap
+        "reacted": False,
+        "reaction_high": None,
         "invalidated": False,
         "traded": False,
     }
 
 def zone_invalidated(df_15m: pd.DataFrame, zone: Dict[str, Any]) -> bool:
-    # invalid if 15m close below zone bottom
     last_close = float(df_15m["close"].iloc[-1])
     return last_close < float(zone["bottom"])
 
 def detect_zone_tap(df_15m: pd.DataFrame, zone: Dict[str, Any]) -> bool:
-    # Tap: wick touches zone & candle does not close below bottom
     last = df_15m.iloc[-1]
     low = float(last["low"])
     close = float(last["close"])
@@ -518,14 +463,7 @@ def detect_zone_tap(df_15m: pd.DataFrame, zone: Dict[str, Any]) -> bool:
     return bool(touched and not_closed_below)
 
 def update_reaction(df_15m: pd.DataFrame, zone: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    After tap, require price moves >= 1R away from zone.
-    We define R = zone_height = top - bottom.
-    Reaction condition: max_high_since_tap >= zone_top + REACTION_R_MULT * zone_height
-    """
-    if not zone.get("tapped"):
-        return zone
-    if zone.get("reacted"):
+    if not zone.get("tapped") or zone.get("reacted"):
         return zone
 
     zone_top = float(zone["top"])
@@ -538,7 +476,6 @@ def update_reaction(df_15m: pd.DataFrame, zone: Dict[str, Any]) -> Dict[str, Any
     if not tap_ts:
         return zone
 
-    # find highs since tap candle timestamp
     df_after = df_15m[df_15m["ts"] >= tap_ts]
     if df_after.empty:
         return zone
@@ -553,11 +490,6 @@ def update_reaction(df_15m: pd.DataFrame, zone: Dict[str, Any]) -> Dict[str, Any
     return zone
 
 def detect_pump(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    """
-    Pump must occur within last 1–3 candles (ending at latest candle):
-    - bullish move 5–6% from lowest low before pump to highest high of pump
-    - must break previous minor high (BREAK_LOOKBACK)
-    """
     if len(df_15m) < max(80, BREAK_LOOKBACK + 10):
         return None
 
@@ -570,8 +502,6 @@ def detect_pump(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
             continue
 
         window = df_15m.iloc[start:end+1]
-
-        # "lowest low before the pump" (use a small lookback immediately before pump window)
         low_before = float(df_15m["low"].iloc[start-2:start+1].min())
         high_of_pump = float(window["high"].max())
         if low_before <= 0:
@@ -581,11 +511,9 @@ def detect_pump(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if move_pct < PUMP_MIN_PCT or move_pct > PUMP_MAX_PCT:
             continue
 
-        # bullish move proxy
         if float(window["close"].iloc[-1]) <= float(window["open"].iloc[0]):
             continue
 
-        # must break minor high / liquidity
         if high_of_pump <= prev_minor_high:
             continue
 
@@ -619,20 +547,16 @@ def entry_conditions(df_15m: pd.DataFrame, zone: Dict[str, Any], fib: Dict[str, 
     c = float(last["close"])
     l = float(last["low"])
 
-    # retrace into demand zone (wick into zone, and no close below bottom)
     in_zone = (l <= float(zone["top"])) and (c >= float(zone["bottom"]))
     if not in_zone:
         return False
 
-    # fib confluence (close inside fib window)
     if not price_in_fib_window(c, fib):
         return False
 
-    # bullish confirmation candle
     if ENTRY_REQUIRES_BULLISH and c <= o:
         return False
 
-    # must close above demand zone (interpreted as above zone top)
     if ENTRY_CLOSE_ABOVE_ZONE_TOP and c <= float(zone["top"]):
         return False
 
@@ -649,7 +573,7 @@ def build_trade(ex_name: str, symbol: str, entry: float, zone: Dict[str, Any], d
         return None
 
     if STOP_METHOD == "STRUCT":
-        stop = float(zone["bottom"]) * (1.0 - 0.0002)  # tiny buffer below zone bottom
+        stop = float(zone["bottom"]) * (1.0 - 0.0002)
     else:
         stop = entry - 1.0 * atr
 
@@ -657,7 +581,7 @@ def build_trade(ex_name: str, symbol: str, entry: float, zone: Dict[str, Any], d
         return None
 
     risk_dist = entry - stop
-    tp = entry + RR * risk_dist  # strict 1:1
+    tp = entry + RR * risk_dist
 
     now = int(time.time())
     return {
@@ -680,7 +604,7 @@ def send_signal(trade: Dict[str, Any], zone: Dict[str, Any], pump: Dict[str, Any
         f"Exchange: {trade['ex_name']}\n"
         f"Pair: {trade['symbol']}\n\n"
         f"Demand Zone: top={zone['top']:.6f} | bottom={zone['bottom']:.6f}\n"
-        f"Tap: first tap only | Reaction: {('OK' if zone.get('reacted') else 'PENDING')}\n"
+        f"Tap: first tap only | Reaction: {'OK' if zone.get('reacted') else 'PENDING'}\n"
         f"Pump: {pump['move_pct']:.2f}% (1–{PUMP_MAX_CANDLES} candles)\n"
         f"Fib: 0.382={fib['0.382']:.6f} | 0.5={fib['0.500']:.6f} | 0.618={fib['0.618']:.6f}\n\n"
         f"Entry (15m close): {trade['entry']:.6f}\n"
@@ -798,7 +722,6 @@ def scanner_loop():
                     if len(df_15m) < 140 or len(df_1h) < 80:
                         continue
 
-                    # Filters
                     if not ctx_bullish_1h(df_1h):
                         continue
                     if not low_vol_ok(df_15m):
@@ -807,8 +730,8 @@ def scanner_loop():
                     skey = f"{ex_name}|{symbol}"
                     st = symbol_state.get(skey, {})
 
-                    # 0) Handle existing zone invalidation
                     zone = st.get("zone")
+
                     if zone and not zone.get("invalidated", False):
                         if zone_invalidated(df_15m, zone):
                             zone["invalidated"] = True
@@ -818,14 +741,12 @@ def scanner_loop():
                             symbol_state[skey] = st
                             continue
 
-                    # 1) If no active zone (or traded/invalidated), try detect a new one
                     if not zone or zone.get("invalidated") or zone.get("traded"):
                         new_zone = detect_demand_zone(df_15m)
                         if new_zone:
                             symbol_state[skey] = {"zone": new_zone}
                         continue
 
-                    # 2) Tap logic (first tap only)
                     if not zone.get("tapped", False):
                         if detect_zone_tap(df_15m, zone):
                             zone["tapped"] = True
@@ -835,19 +756,13 @@ def scanner_loop():
                             symbol_state[skey] = st
                         else:
                             continue
-                    else:
-                        if FIRST_TAP_ONLY and zone.get("tapped") and zone.get("traded") is False:
-                            # no second tap triggers; we still allow the setup chain (reaction/pump/fib) from first tap
-                            pass
 
-                    # 3) Reaction requirement (>= 1R away after tap)
                     zone = update_reaction(df_15m, zone)
                     st["zone"] = zone
                     symbol_state[skey] = st
                     if not zone.get("reacted", False):
                         continue
 
-                    # 4) Pump detection (5–6% in 1–3 candles)
                     pump = st.get("pump")
                     if not pump:
                         pump = detect_pump(df_15m)
@@ -862,17 +777,15 @@ def scanner_loop():
                     if not fib:
                         continue
 
-                    # 5) Entry conditions (zone ∩ fib window, bullish close above zone top)
                     if entry_conditions(df_15m, zone, fib):
                         if not allow(ex_name, symbol, "LONG"):
                             continue
 
-                        entry_price = float(df_15m["close"].iloc[-1])  # entry at close of confirmation candle
+                        entry_price = float(df_15m["close"].iloc[-1])
                         trade = build_trade(ex_name, symbol, entry_price, zone, df_15m)
                         if not trade:
                             continue
 
-                        # one trade per zone
                         zone["traded"] = True
                         st["zone"] = zone
                         symbol_state[skey] = st
@@ -892,7 +805,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "CRT 15m STRATEGY BOT RUNNING (INFO ONLY) — OKX + KUCOIN"
+    return "CRT 15m STRATEGY BOT RUNNING (INFO ONLY) — OKX + KUCOIN (TUNED)"
 
 if __name__ == "__main__":
     threading.Thread(target=scanner_loop, daemon=True).start()
