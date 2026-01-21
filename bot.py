@@ -1,16 +1,16 @@
 # ======================================================
 # CRT 15-MINUTE STRATEGY BOT (INFO ONLY) — 3–5 SIGNALS/DAY TUNED
-# OKX + KUCOIN FUTURES • SAME STRUCTURE AS YOUR LAST BOT
+# OKX + KUCOIN FUTURES • UPDATED PER REQUEST
 #
-# TF SETUP:
-# - EXECUTION: 15m (ALL entries/exits/validations happen on 15m only)
-# - CONTEXT:   1h (filter only)
-#
-# TUNED FOR ~3–5 SIGNALS/DAY (MINIMAL LOOSENING, STILL CRT-STYLE):
-# - Pump widened: 4.5%–7.0% and up to 4 candles
-# - Demand displacement loosened a bit
-# - Base loosened a bit
-# - Wider universe + lower vol floor (helps KuCoin)
+# CHANGES ADDED:
+# 1) TWO TPs:
+#    - TP1 = 1:1 (1R)
+#    - TP2 = default 2.5R (env override TP2_RR)
+# 2) STOP BELOW WICK:
+#    - Stop uses tap candle wick low (zone["tap_low"]) minus a small buffer
+# 3) ENTRY FIB = 0.618:
+#    - Entry requires the 15m candle to TOUCH fib 0.618 (wick touch),
+#      and still confirm via bullish close above zone top (as before).
 #
 # ⚠️ INFO ONLY. NOT FINANCIAL ADVICE. NO EXECUTION.
 # ======================================================
@@ -94,23 +94,28 @@ PUMP_MAX_PCT = float(os.getenv("PUMP_MAX_PCT", 7.0))              # was 6.0
 PUMP_MAX_CANDLES = int(os.getenv("PUMP_MAX_CANDLES", 4))          # was 3
 BREAK_LOOKBACK = int(os.getenv("BREAK_LOOKBACK", 20))
 
-# Fib window
-FIB_MIN = float(os.getenv("FIB_MIN", 0.382))
-FIB_MAX = float(os.getenv("FIB_MAX", 0.618))
+# Fib entry level (REQUESTED: 0.618)
+FIB_ENTRY_LEVEL = os.getenv("FIB_ENTRY_LEVEL", "0.618").strip()
+if FIB_ENTRY_LEVEL not in ("0.382", "0.500", "0.618"):
+    FIB_ENTRY_LEVEL = "0.618"
 
 # Entry rules
 ENTRY_REQUIRES_BULLISH = True
 ENTRY_CLOSE_ABOVE_ZONE_TOP = True
 
-# Stop method (choose ONE and keep consistent)
+# Stop method (kept but STRUCT now means wick-based structure)
 STOP_METHOD = os.getenv("STOP_METHOD", "STRUCT").strip().upper()   # STRUCT or ATR
 if STOP_METHOD not in ("STRUCT", "ATR"):
     STOP_METHOD = "STRUCT"
 
 ATR_LEN = int(os.getenv("ATR_LEN", 14))
 
-# TP: strict 1:1
-RR = 1.0
+# TAKE PROFITS (REQUESTED)
+TP1_RR = float(os.getenv("TP1_RR", 1.0))     # TP1 fixed 1R
+TP2_RR = float(os.getenv("TP2_RR", 2.5))     # TP2 default 2.5R
+
+# Wick stop buffer (small cushion under wick)
+WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0005))  # 0.05%
 
 # Filters
 CTX_EMA_FAST = int(os.getenv("CTX_EMA_FAST", 20))
@@ -175,8 +180,8 @@ def send_startup():
         "Demand Zone: bullish displacement after base\n"
         "Tap: first tap only + must NOT close below zone + requires >=1R reaction\n"
         f"Pump: {PUMP_MIN_PCT:.1f}%–{PUMP_MAX_PCT:.1f}% in 1–{PUMP_MAX_CANDLES} (15m)\n"
-        "Fib: 0.382/0.5/0.618 | Entry on bullish 15m close above zone top\n"
-        f"Stop method: {STOP_METHOD} | TP: strict 1:1 only\n"
+        f"Fib Entry: TOUCH {FIB_ENTRY_LEVEL} | Confirm: bullish close above zone top\n"
+        f"Stop: below tap wick (buffer {WICK_STOP_BUFFER_PCT*100:.3f}%) | TP1=1R | TP2={TP2_RR:.1f}R\n"
         f"Universe: pair_limit={PAIR_LIMIT} movers={TOP_MOVER_COUNT} qv≥{MIN_QUOTE_VOL_USDT/1e6:.1f}M\n\n"
         f"Exchanges: {', '.join(EXCHANGES)}\n\n"
         "⚠️ Info only. Not financial advice."
@@ -444,6 +449,7 @@ def detect_demand_zone(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
         "bottom": zone_bottom,
         "tapped": False,
         "tap_ts": None,
+        "tap_low": None,          # NEW: store tap wick low for wick-based stop
         "reacted": False,
         "reaction_high": None,
         "invalidated": False,
@@ -536,22 +542,20 @@ def fib_levels(swing_low: float, swing_high: float) -> Dict[str, float]:
         "0.618": swing_high - 0.618 * diff,
     }
 
-def price_in_fib_window(price: float, fib: Dict[str, float]) -> bool:
-    lo = min(float(fib["0.382"]), float(fib["0.618"]))
-    hi = max(float(fib["0.382"]), float(fib["0.618"]))
-    return lo <= price <= hi
-
 def entry_conditions(df_15m: pd.DataFrame, zone: Dict[str, Any], fib: Dict[str, float]) -> bool:
     last = df_15m.iloc[-1]
     o = float(last["open"])
     c = float(last["close"])
     l = float(last["low"])
+    h = float(last["high"])
 
     in_zone = (l <= float(zone["top"])) and (c >= float(zone["bottom"]))
     if not in_zone:
         return False
 
-    if not price_in_fib_window(c, fib):
+    # NEW: entry requires TOUCH of fib 0.618 (or chosen single level)
+    lvl = float(fib[FIB_ENTRY_LEVEL])
+    if not (l <= lvl <= h):
         return False
 
     if ENTRY_REQUIRES_BULLISH and c <= o:
@@ -572,16 +576,22 @@ def build_trade(ex_name: str, symbol: str, entry: float, zone: Dict[str, Any], d
     if atr <= 0:
         return None
 
-    if STOP_METHOD == "STRUCT":
-        stop = float(zone["bottom"]) * (1.0 - 0.0002)
-    else:
+    if STOP_METHOD == "ATR":
         stop = entry - 1.0 * atr
+    else:
+        # NEW: STRUCT stop = below wick (tap candle wick low) with buffer
+        tap_low = zone.get("tap_low")
+        if tap_low is None:
+            tap_low = float(last["low"])
+        wick_low = min(float(tap_low), float(last["low"]), float(zone["bottom"]))
+        stop = wick_low * (1.0 - WICK_STOP_BUFFER_PCT)
 
     if stop <= 0 or stop >= entry:
         return None
 
     risk_dist = entry - stop
-    tp = entry + RR * risk_dist
+    tp1 = entry + TP1_RR * risk_dist
+    tp2 = entry + TP2_RR * risk_dist
 
     now = int(time.time())
     return {
@@ -590,7 +600,9 @@ def build_trade(ex_name: str, symbol: str, entry: float, zone: Dict[str, Any], d
         "direction": "LONG",
         "entry": float(entry),
         "stop": float(stop),
-        "tp": float(tp),
+        "tp1": float(tp1),
+        "tp2": float(tp2),
+        "tp1_hit": False,
         "status": "ACTIVE",
         "start_ts": now,
         "created_ts": now,
@@ -606,10 +618,11 @@ def send_signal(trade: Dict[str, Any], zone: Dict[str, Any], pump: Dict[str, Any
         f"Demand Zone: top={zone['top']:.6f} | bottom={zone['bottom']:.6f}\n"
         f"Tap: first tap only | Reaction: {'OK' if zone.get('reacted') else 'PENDING'}\n"
         f"Pump: {pump['move_pct']:.2f}% (1–{PUMP_MAX_CANDLES} candles)\n"
-        f"Fib: 0.382={fib['0.382']:.6f} | 0.5={fib['0.500']:.6f} | 0.618={fib['0.618']:.6f}\n\n"
+        f"Fib entry: TOUCH {FIB_ENTRY_LEVEL}={float(fib[FIB_ENTRY_LEVEL]):.6f}\n\n"
         f"Entry (15m close): {trade['entry']:.6f}\n"
-        f"Stop ({STOP_METHOD}): {trade['stop']:.6f}\n"
-        f"TP (1:1 only): {trade['tp']:.6f}\n\n"
+        f"Stop ({STOP_METHOD}, below wick): {trade['stop']:.6f}\n"
+        f"TP1 (1R): {trade['tp1']:.6f}\n"
+        f"TP2 ({TP2_RR:.1f}R): {trade['tp2']:.6f}\n\n"
         f"Time: {ts}\n\n"
         "⚠️ Info only. Not financial advice."
     )
@@ -673,7 +686,8 @@ def tracker_loop():
                     continue
 
                 stop = float(t["stop"])
-                tp = float(t["tp"])
+                tp1 = float(t["tp1"])
+                tp2 = float(t["tp2"])
 
                 if px <= stop:
                     send_telegram(f"❌ SL HIT — {t['symbol']} (LONG) ({t['ex_name']})")
@@ -683,8 +697,17 @@ def tracker_loop():
                         open_trades.pop(k, None)
                     continue
 
-                if px >= tp:
-                    send_telegram(f"✅ TP HIT (1:1) — {t['symbol']} (LONG) ({t['ex_name']})")
+                # TP1 partial (does not close trade)
+                if (not t.get("tp1_hit", False)) and px >= tp1:
+                    send_telegram(f"✅ TP1 HIT (1R) — {t['symbol']} (LONG) ({t['ex_name']})")
+                    with open_trades_lock:
+                        if k in open_trades:
+                            open_trades[k]["tp1_hit"] = True
+                    continue
+
+                # TP2 closes trade
+                if px >= tp2:
+                    send_telegram(f"🏁 TP2 HIT ({TP2_RR:.1f}R) — {t['symbol']} (LONG) ({t['ex_name']})")
                     _record_closed(t, "WIN", px)
                     with open_trades_lock:
                         open_trades.pop(k, None)
@@ -751,6 +774,7 @@ def scanner_loop():
                         if detect_zone_tap(df_15m, zone):
                             zone["tapped"] = True
                             zone["tap_ts"] = int(df_15m["ts"].iloc[-1])
+                            zone["tap_low"] = float(df_15m["low"].iloc[-1])  # NEW for wick stop
                             zone["reaction_high"] = float(df_15m["high"].iloc[-1])
                             st["zone"] = zone
                             symbol_state[skey] = st
@@ -805,7 +829,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "CRT 15m STRATEGY BOT RUNNING (INFO ONLY) — OKX + KUCOIN (TUNED)"
+    return "CRT 15m STRATEGY BOT RUNNING (INFO ONLY) — OKX + KUCOIN (TUNED, 2TP, WICK STOP, FIB 0.618)"
 
 if __name__ == "__main__":
     threading.Thread(target=scanner_loop, daemon=True).start()
