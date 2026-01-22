@@ -26,7 +26,8 @@ import threading
 from flask import Flask
 import requests
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional, List, Tuple
 
 # ======================================================
@@ -34,7 +35,19 @@ from typing import Dict, Any, Optional, List, Tuple
 # ======================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("CRT_15M_OPTION_B")
+log = logging.getLogger("CRT_15M_OPTION_B_BALANCED")
+
+# ======================================================
+# TIME HELPERS
+# ======================================================
+
+CT = ZoneInfo("America/Chicago")
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+def ct_time_str() -> str:
+    return datetime.now(timezone.utc).astimezone(CT).strftime("%H:%M CT")
 
 # ======================================================
 # CONFIG - OPTION B (BALANCED)
@@ -67,7 +80,7 @@ TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 10))
 # Exchanges (ONLY OKX + KuCoin Futures)
 EXCHANGES = os.getenv("EXCHANGES", "okx,kucoin_futures").split(",")
 EXCHANGES = [e.strip() for e in EXCHANGES if e.strip()]
-EXCHANGES = [e for e in EXCHANGES if e in ("okx", "kucoin_futures")]
+EXCHANGES = [e for e in EXCHANGES if e in ("okx", "kucoin_futures")]  # hard clamp
 
 # Universe
 PAIR_LIMIT = int(os.getenv("PAIR_LIMIT", 260))
@@ -80,27 +93,25 @@ ALLOW_ONLY_ACTIVE = os.getenv("ALLOW_ONLY_ACTIVE", "1") == "1"
 TF_EXEC = "15m"
 TF_CTX = "1h"
 
-# Demand Zone detection - OPTION B (BALANCED)
+# Demand Zone detection - OPTION B
 BASE_LOOKBACK = int(os.getenv("BASE_LOOKBACK", 5))
-BASE_MAX_BODY_PCT = float(os.getenv("BASE_MAX_BODY_PCT", 0.45))      # TIGHTENED
+BASE_MAX_BODY_PCT = float(os.getenv("BASE_MAX_BODY_PCT", 0.45))      # TIGHTENED (45%)
 DISP_BODY_PCT_MIN = float(os.getenv("DISP_BODY_PCT_MIN", 0.55))
 RANGE_SMA_LEN = int(os.getenv("RANGE_SMA_LEN", 20))
 DISP_RANGE_MULT = float(os.getenv("DISP_RANGE_MULT", 1.5))
 
-# Tap + reaction - OPTION B (BALANCED)
+# Tap + reaction - OPTION B
 FIRST_TAP_ONLY = True
-REACTION_R_MULT = float(os.getenv("REACTION_R_MULT", 1.5))           # INCREASED
+REACTION_R_MULT = float(os.getenv("REACTION_R_MULT", 1.5))           # STRONGER REACTION (1.5R)
 
-# Pump detection - OPTION B (BALANCED)
-PUMP_MIN_PCT = float(os.getenv("PUMP_MIN_PCT", 5.0))                 # INCREASED
-PUMP_MAX_PCT = float(os.getenv("PUMP_MAX_PCT", 6.5))                 # DECREASED
+# Pump detection - OPTION B
+PUMP_MIN_PCT = float(os.getenv("PUMP_MIN_PCT", 5.0))                 # 5.0%
+PUMP_MAX_PCT = float(os.getenv("PUMP_MAX_PCT", 6.5))                 # 6.5%
 PUMP_MAX_CANDLES = int(os.getenv("PUMP_MAX_CANDLES", 4))
 BREAK_LOOKBACK = int(os.getenv("BREAK_LOOKBACK", 20))
 
-# Fib entry level
-FIB_ENTRY_LEVEL = os.getenv("FIB_ENTRY_LEVEL", "0.618").strip()
-if FIB_ENTRY_LEVEL not in ("0.382", "0.500", "0.618"):
-    FIB_ENTRY_LEVEL = "0.618"
+# Fib entry level - OPTION B (0.618 required)
+FIB_ENTRY_LEVEL = "0.618"
 
 # Entry rules
 ENTRY_REQUIRES_BULLISH = True
@@ -110,33 +121,36 @@ ENTRY_CLOSE_ABOVE_ZONE_TOP = True
 STOP_METHOD = os.getenv("STOP_METHOD", "STRUCT").strip().upper()
 if STOP_METHOD not in ("STRUCT", "ATR"):
     STOP_METHOD = "STRUCT"
-
 ATR_LEN = int(os.getenv("ATR_LEN", 14))
+ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", 1.0))
 
-# Take profits
+# Take profits (2 TP, dynamic TP2)
 TP1_RR = float(os.getenv("TP1_RR", 1.0))
-TP2_RR_MIN = float(os.getenv("TP2_RR_MIN", 2.0))  # Minimum TP2
-TP2_RR_MAX = float(os.getenv("TP2_RR_MAX", 4.0))  # Maximum TP2
-TP2_DYNAMIC = os.getenv("TP2_DYNAMIC", "1") == "1"  # Enable dynamic TP2
+TP2_RR_MIN = float(os.getenv("TP2_RR_MIN", 2.0))
+TP2_RR_MAX = float(os.getenv("TP2_RR_MAX", 4.0))
+TP2_DYNAMIC = os.getenv("TP2_DYNAMIC", "1") == "1"
+
+# Partial sizing (info-only)
+TP1_SIZE_PCT = float(os.getenv("TP1_SIZE_PCT", 0.25))  # 25%
+TP2_SIZE_PCT = float(os.getenv("TP2_SIZE_PCT", 0.75))  # 75%
 
 # Wick stop buffer
-WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0005))
+WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0005))  # 0.05%
 
-# Filters - OPTION B (BALANCED)
+# Filters - OPTION B
 CTX_EMA_FAST = int(os.getenv("CTX_EMA_FAST", 20))
 CTX_EMA_SLOW = int(os.getenv("CTX_EMA_SLOW", 50))
-
 ENABLE_LOW_VOL_FILTER = os.getenv("ENABLE_LOW_VOL_FILTER", "1") == "1"
-LOW_VOL_MULT = float(os.getenv("LOW_VOL_MULT", 0.85))                # INCREASED
+LOW_VOL_MULT = float(os.getenv("LOW_VOL_MULT", 0.85))  # 85% of average
 
 NEWS_BLACKOUT_UTC = os.getenv("NEWS_BLACKOUT_UTC", "").strip()
 
-# Breakout confirmation - OPTION B (BALANCED)
+# Breakout confirmation - OPTION B
 ENABLE_BREAKOUT_CONFIRMATION = os.getenv("ENABLE_BREAKOUT_CONFIRMATION", "1") == "1"
-BREAKOUT_CANDLES_REQUIRED = int(os.getenv("BREAKOUT_CANDLES_REQUIRED", 2))  # 2 candles confirmation
+BREAKOUT_CANDLES_REQUIRED = int(os.getenv("BREAKOUT_CANDLES_REQUIRED", 2))  # 2 candles
 BREAKOUT_CLOSE_ABOVE_HIGH = os.getenv("BREAKOUT_CLOSE_ABOVE_HIGH", "1") == "1"
 
-# Cooldowns
+# Cooldowns (seconds)
 WINDOW = int(os.getenv("WINDOW", 1800))
 STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 7200))
 
@@ -147,8 +161,8 @@ STATS_BATCH_SIZE = int(os.getenv("STATS_BATCH_SIZE", 20))
 # STATE
 # ======================================================
 
-recent_signals: Dict[str, float] = {}
-penalty_cooldowns: Dict[str, float] = {}
+recent_signals: Dict[str, float] = {}        # seconds
+penalty_cooldowns: Dict[str, float] = {}     # seconds
 
 open_trades: Dict[str, Dict[str, Any]] = {}
 open_trades_lock = threading.Lock()
@@ -156,7 +170,7 @@ open_trades_lock = threading.Lock()
 closed_trades: List[Dict[str, Any]] = []
 stats_lock = threading.Lock()
 
-symbol_state: Dict[str, Dict[str, Any]] = {}
+symbol_state: Dict[str, Dict[str, Any]] = {}  # zone/pump/fib per ex|symbol
 
 # ======================================================
 # TELEGRAM
@@ -179,39 +193,37 @@ def send_telegram(text: str):
         for ch in chunks:
             try:
                 url = f"{TELEGRAM_API}/bot{BOT_TOKEN}/sendMessage"
-                requests.post(url, json={"chat_id": cid, "text": ch}, timeout=10)
+                r = requests.post(url, json={"chat_id": cid, "text": ch}, timeout=10)
+                if r.status_code >= 400:
+                    log.error(f"Telegram HTTP {r.status_code}: {r.text[:200]}")
             except Exception as e:
                 log.error(f"Telegram error for {cid}: {e}")
 
 def send_startup():
-    utc_now = datetime.now(timezone.utc)
-    central_time = utc_now - timedelta(hours=6)
-    ts = central_time.strftime("%H:%M CT")
-    
     tp2_msg = f"Dynamic ({TP2_RR_MIN:.1f}-{TP2_RR_MAX:.1f}:1)" if TP2_DYNAMIC else f"Fixed {TP2_RR_MIN:.1f}:1"
-    
     msg = (
-        f"🤖 CRT 15M BOT STARTED (OPTION B - BALANCED)\n\n"
-        f"📊 Strategy: High Win Rate Setup\n"
-        f"🎯 Expected: 3-4 signals/day | 68-72% win rate\n\n"
-        f"⚙️ Key Filters:\n"
+        "🤖 CRT 15M BOT STARTED (OPTION B - BALANCED)\n\n"
+        "📊 Strategy: High Win Rate Setup\n"
+        "🎯 Expected: 3-4 signals/day | 68-72% win rate\n\n"
+        "⚙️ Key Filters:\n"
         f"• Pump: {PUMP_MIN_PCT:.1f}%-{PUMP_MAX_PCT:.1f}%\n"
         f"• Reaction: {REACTION_R_MULT:.1f}R minimum\n"
         f"• Breakout: {BREAKOUT_CANDLES_REQUIRED} candles confirmation\n"
         f"• Volume: {int(LOW_VOL_MULT*100)}% of average\n"
-        f"• Base: Max {int(BASE_MAX_BODY_PCT*100)}% body candles\n\n"
-        f"💰 Take Profits:\n"
-        f"• TP1: 1:1 (25% profit)\n"
-        f"• TP2: {tp2_msg} (75% profit - RECOMMENDED)\n\n"
+        f"• Base: Max {int(BASE_MAX_BODY_PCT*100)}% body candles\n"
+        f"• Fib Entry: {FIB_ENTRY_LEVEL}\n\n"
+        "💰 Take Profits:\n"
+        f"• TP1: 1:1 ({int(TP1_SIZE_PCT*100)}% profit)\n"
+        f"• TP2: {tp2_msg} ({int(TP2_SIZE_PCT*100)}% profit)\n\n"
         f"🔄 Exchanges: {', '.join([e.upper() for e in EXCHANGES])}\n"
-        f"⏰ Scanning every {SCAN_INTERVAL}s\n"
-        f"🕐 Started: {ts}\n\n"
+        f"⏰ Scanning every {SCAN_INTERVAL}s | Tracking every {TRACK_INTERVAL}s\n"
+        f"🕐 Started: {ct_time_str()}\n\n"
         "✅ Bot is active and monitoring..."
     )
     send_telegram(msg)
 
 # ======================================================
-# NEWS BLACKOUT HELPERS (UTC)
+# NEWS BLACKOUT HELPERS (UTC) - seconds based
 # ======================================================
 
 def _parse_blackouts(raw: str) -> List[Tuple[int, int]]:
@@ -237,38 +249,38 @@ BLACKOUTS = _parse_blackouts(NEWS_BLACKOUT_UTC)
 def in_news_blackout() -> bool:
     if not BLACKOUTS:
         return False
-    now = int(datetime.now(timezone.utc).timestamp())
+    now_s = int(datetime.now(timezone.utc).timestamp())
     for a, b in BLACKOUTS:
-        if a <= now <= b:
+        if a <= now_s <= b:
             return True
     return False
 
 # ======================================================
-# COOLDOWNS
+# COOLDOWNS (seconds)
 # ======================================================
 
 def _cd_key(ex_name: str, symbol: str, direction: str) -> str:
     return f"{ex_name}_{symbol}_{direction}"
 
 def allow(ex_name: str, symbol: str, direction: str) -> bool:
-    now = time.time()
+    now_s = time.time()
     key = _cd_key(ex_name, symbol, direction)
 
     pen_exp = penalty_cooldowns.get(key)
-    if pen_exp and now < pen_exp:
+    if pen_exp and now_s < pen_exp:
         return False
 
     last = recent_signals.get(key)
-    if last is None or (now - last) > WINDOW:
-        recent_signals[key] = now
+    if last is None or (now_s - last) > WINDOW:
+        recent_signals[key] = now_s
         return True
     return False
 
 def apply_stop_penalty(ex_name: str, symbol: str, direction: str):
-    now = time.time()
+    now_s = time.time()
     key = _cd_key(ex_name, symbol, direction)
-    penalty_cooldowns[key] = now + STOP_PENALTY_WINDOW
-    recent_signals[key] = now
+    penalty_cooldowns[key] = now_s + STOP_PENALTY_WINDOW
+    recent_signals[key] = now_s
 
 # ======================================================
 # INDICATORS
@@ -297,6 +309,7 @@ def get_df(ex, symbol: str, tf: str) -> Optional[pd.DataFrame]:
     try:
         data = ex.fetch_ohlcv(symbol, tf, limit=260)
         df = pd.DataFrame(data, columns=["ts","open","high","low","close","volume"])
+        # NOTE: CCXT timestamps are ms
         if tf == "15m":
             return add_indicators_15m(df)
         if tf == "1h":
@@ -375,17 +388,25 @@ def build_quality_universe(ex) -> list:
                 continue
             qv = float(bv) * last
         else:
-            qv = float(qv)
+            try:
+                qv = float(qv)
+            except Exception:
+                continue
 
         if qv < MIN_QUOTE_VOL_USDT:
             continue
 
         bid = t.get("bid")
         ask = t.get("ask")
-        if bid and ask and float(bid) > 0:
-            spread_bps = ((float(ask) - float(bid)) / float(bid)) * 10_000
-            if spread_bps > MAX_SPREAD_BPS:
-                continue
+        if bid and ask:
+            try:
+                bidf, askf = float(bid), float(ask)
+                if bidf > 0:
+                    spread_bps = ((askf - bidf) / bidf) * 10_000
+                    if spread_bps > MAX_SPREAD_BPS:
+                        continue
+            except Exception:
+                pass
 
         out.append((symbol, qv))
 
@@ -457,7 +478,8 @@ def detect_demand_zone(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
         return None
 
     body_pcts = base_df.apply(_candle_body_pct, axis=1)
-    if body_pcts.mean() > BASE_MAX_BODY_PCT:
+    base_body_mean = float(body_pcts.mean())
+    if base_body_mean > BASE_MAX_BODY_PCT:
         return None
 
     zone_top = float(base_df["close"].max())
@@ -466,11 +488,12 @@ def detect_demand_zone(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
         return None
 
     return {
-        "created_ts": int(disp["ts"]),
+        "created_ts": int(disp["ts"]),      # ms
         "top": zone_top,
         "bottom": zone_bottom,
+        "base_body_pct_mean": base_body_mean,
         "tapped": False,
-        "tap_ts": None,
+        "tap_ts": None,                     # ms
         "tap_low": None,
         "reacted": False,
         "reaction_high": None,
@@ -490,6 +513,13 @@ def detect_zone_tap(df_15m: pd.DataFrame, zone: Dict[str, Any]) -> bool:
     not_closed_below = close >= float(zone["bottom"])
     return bool(touched and not_closed_below)
 
+def mark_tap(df_15m: pd.DataFrame, zone: Dict[str, Any]) -> None:
+    last = df_15m.iloc[-1]
+    zone["tapped"] = True
+    zone["tap_ts"] = int(last["ts"])     # ms
+    zone["tap_low"] = float(last["low"])
+    zone["reaction_high"] = float(last["high"])
+
 def update_reaction(df_15m: pd.DataFrame, zone: Dict[str, Any]) -> Dict[str, Any]:
     if not zone.get("tapped") or zone.get("reacted"):
         return zone
@@ -504,7 +534,7 @@ def update_reaction(df_15m: pd.DataFrame, zone: Dict[str, Any]) -> Dict[str, Any
     if not tap_ts:
         return zone
 
-    df_after = df_15m[df_15m["ts"] >= tap_ts]
+    df_after = df_15m[df_15m["ts"] >= int(tap_ts)]
     if df_after.empty:
         return zone
 
@@ -530,6 +560,8 @@ def detect_pump(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
             continue
 
         window = df_15m.iloc[start:end+1]
+
+        # (kept as your earlier approach; if you want stricter "pre-pump" low, we can change this)
         low_before = float(df_15m["low"].iloc[start-2:start+1].min())
         high_of_pump = float(window["high"].max())
         if low_before <= 0:
@@ -551,7 +583,7 @@ def detect_pump(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
             "swing_low": float(low_before),
             "swing_high": float(high_of_pump),
             "move_pct": float(move_pct),
-            "pump_ts": int(df_15m["ts"].iloc[end]),
+            "pump_ts": int(df_15m["ts"].iloc[end]),  # ms
         }
 
     return None
@@ -564,92 +596,6 @@ def fib_levels(swing_low: float, swing_high: float) -> Dict[str, float]:
         "0.618": swing_high - 0.618 * diff,
     }
 
-def calculate_dynamic_tp2(zone: Dict[str, Any], pump: Dict[str, Any], df_15m: pd.DataFrame, df_1h: pd.DataFrame) -> float:
-    """
-    Calculate dynamic TP2 based on setup quality and market conditions.
-    Returns R:R ratio between TP2_RR_MIN and TP2_RR_MAX.
-    """
-    if not TP2_DYNAMIC:
-        return TP2_RR_MIN  # Use minimum if dynamic disabled
-    
-    score = 0.0
-    max_score = 10.0
-    
-    # 1. Pump strength (0-2 points)
-    pump_pct = pump["move_pct"]
-    if pump_pct >= 6.0:
-        score += 2.0  # Strong pump
-    elif pump_pct >= 5.5:
-        score += 1.5
-    elif pump_pct >= 5.0:
-        score += 1.0
-    else:
-        score += 0.5
-    
-    # 2. Reaction strength (0-2 points)
-    zone_size = zone["top"] - zone["bottom"]
-    if zone_size > 0:
-        reaction_high = zone.get("reaction_high", zone["top"])
-        reaction_r = (reaction_high - zone["top"]) / zone_size
-        if reaction_r >= 2.5:
-            score += 2.0  # Very strong reaction
-        elif reaction_r >= 2.0:
-            score += 1.5
-        elif reaction_r >= 1.5:
-            score += 1.0
-        else:
-            score += 0.5
-    
-    # 3. Volume strength (0-2 points)
-    last = df_15m.iloc[-1]
-    if not pd.isna(last["vol_sma"]) and float(last["vol_sma"]) > 0:
-        vol_ratio = float(last["volume"]) / float(last["vol_sma"])
-        if vol_ratio >= 1.5:
-            score += 2.0  # Exceptional volume
-        elif vol_ratio >= 1.2:
-            score += 1.5
-        elif vol_ratio >= 1.0:
-            score += 1.0
-        else:
-            score += 0.5
-    
-    # 4. 1h trend strength (0-2 points)
-    last_1h = df_1h.iloc[-1]
-    if not pd.isna(last_1h["ema_fast"]) and float(last_1h["ema_fast"]) > 0:
-        distance_above_ema = (float(last_1h["close"]) - float(last_1h["ema_fast"])) / float(last_1h["ema_fast"]) * 100
-        if distance_above_ema >= 2.0:
-            score += 2.0  # Strong trend
-        elif distance_above_ema >= 1.0:
-            score += 1.5
-        elif distance_above_ema >= 0.5:
-            score += 1.0
-        else:
-            score += 0.5
-    
-    # 5. Base quality (0-2 points)
-    # Tighter base = better quality
-    body_pct = BASE_MAX_BODY_PCT
-    if body_pct <= 0.35:
-        score += 2.0  # Very tight base
-    elif body_pct <= 0.40:
-        score += 1.5
-    elif body_pct <= 0.45:
-        score += 1.0
-    else:
-        score += 0.5
-    
-    # Calculate TP2 based on score
-    # Score 0-5 = TP2_RR_MIN (2.0)
-    # Score 5-10 = Linear scale to TP2_RR_MAX (4.0)
-    score_normalized = score / max_score  # 0 to 1
-    
-    tp2_rr = TP2_RR_MIN + (score_normalized * (TP2_RR_MAX - TP2_RR_MIN))
-    
-    # Clamp to min/max
-    tp2_rr = max(TP2_RR_MIN, min(TP2_RR_MAX, tp2_rr))
-    
-    return round(tp2_rr, 2)
-
 def entry_conditions(df_15m: pd.DataFrame, zone: Dict[str, Any], fib: Dict[str, float]) -> bool:
     last = df_15m.iloc[-1]
     o = float(last["open"])
@@ -661,7 +607,7 @@ def entry_conditions(df_15m: pd.DataFrame, zone: Dict[str, Any], fib: Dict[str, 
     if not in_zone:
         return False
 
-    # Entry requires TOUCH of fib level
+    # Fib 0.618 touch required
     lvl = float(fib[FIB_ENTRY_LEVEL])
     if not (l <= lvl <= h):
         return False
@@ -674,105 +620,196 @@ def entry_conditions(df_15m: pd.DataFrame, zone: Dict[str, Any], fib: Dict[str, 
 
     return True
 
+# ======================================================
+# BREAKOUT CONFIRMATION
+# ======================================================
+
 def check_breakout_confirmation(df_15m: pd.DataFrame, trade: Dict[str, Any]) -> bool:
-    """Check if breakout is confirmed above pump high"""
+    """
+    Require the last N candles AFTER entry to confirm above pump high.
+    Default: N=2 candles close above pump high.
+    """
     if not ENABLE_BREAKOUT_CONFIRMATION:
         return True
-    
+
     if trade.get("breakout_confirmed", False):
         return True
-    
+
     pump_high = float(trade["pump_high"])
-    
-    # Get candles after entry
-    entry_ts = trade.get("start_ts", 0)
-    df_after_entry = df_15m[df_15m["ts"] > entry_ts * 1000]
-    
-    if len(df_after_entry) < BREAKOUT_CANDLES_REQUIRED:
+    entry_ts_ms = int(trade.get("start_ts", 0))  # ms
+
+    df_after = df_15m[df_15m["ts"] > entry_ts_ms]
+    if len(df_after) < BREAKOUT_CANDLES_REQUIRED:
         return False
-    
-    # Check the required number of candles
-    recent_candles = df_after_entry.tail(BREAKOUT_CANDLES_REQUIRED)
-    
-    confirm_count = 0
-    for idx, candle in recent_candles.iterrows():
+
+    recent = df_after.tail(BREAKOUT_CANDLES_REQUIRED)
+
+    ok = True
+    for _, candle in recent.iterrows():
         high = float(candle["high"])
         close = float(candle["close"])
-        
-        # Check if high breaks pump high
-        if high > pump_high:
-            # If required, check if close is also above pump high
-            if BREAKOUT_CLOSE_ABOVE_HIGH:
-                if close > pump_high:
-                    confirm_count += 1
-            else:
-                confirm_count += 1
-    
-    # Require all candles to confirm
-    return confirm_count >= BREAKOUT_CANDLES_REQUIRED
+
+        # Candle must exceed pump high; optionally require close above pump high
+        if high <= pump_high:
+            ok = False
+            break
+        if BREAKOUT_CLOSE_ABOVE_HIGH and close <= pump_high:
+            ok = False
+            break
+
+    return ok
+
+# ======================================================
+# DYNAMIC TP2
+# ======================================================
+
+def calculate_dynamic_tp2_rr(zone: Dict[str, Any], pump: Dict[str, Any], df_15m: pd.DataFrame, df_1h: pd.DataFrame) -> float:
+    """
+    Returns TP2 R:R between TP2_RR_MIN and TP2_RR_MAX based on setup quality:
+    pump, reaction, volume, trend, base
+    """
+    if not TP2_DYNAMIC:
+        return float(TP2_RR_MIN)
+
+    score = 0.0
+    max_score = 10.0
+
+    # 1) Pump strength (0-2)
+    pump_pct = float(pump.get("move_pct", 0.0))
+    if pump_pct >= 6.2:
+        score += 2.0
+    elif pump_pct >= 5.8:
+        score += 1.5
+    elif pump_pct >= 5.3:
+        score += 1.0
+    else:
+        score += 0.5
+
+    # 2) Reaction strength (0-2) in R units
+    zone_size = float(zone["top"] - zone["bottom"])
+    if zone_size > 0:
+        reaction_high = float(zone.get("reaction_high") or zone["top"])
+        reaction_r = (reaction_high - float(zone["top"])) / zone_size
+        if reaction_r >= 2.5:
+            score += 2.0
+        elif reaction_r >= 2.0:
+            score += 1.5
+        elif reaction_r >= 1.5:
+            score += 1.0
+        else:
+            score += 0.5
+    else:
+        score += 0.5
+
+    # 3) Volume strength (0-2): last candle vol vs vol_sma
+    last = df_15m.iloc[-1]
+    if not pd.isna(last["vol_sma"]) and float(last["vol_sma"]) > 0:
+        vol_ratio = float(last["volume"]) / float(last["vol_sma"])
+        if vol_ratio >= 1.5:
+            score += 2.0
+        elif vol_ratio >= 1.2:
+            score += 1.5
+        elif vol_ratio >= 1.0:
+            score += 1.0
+        else:
+            score += 0.5
+    else:
+        score += 0.5
+
+    # 4) 1h trend strength (0-2): distance above ema_fast
+    last_1h = df_1h.iloc[-1]
+    if not pd.isna(last_1h["ema_fast"]) and float(last_1h["ema_fast"]) > 0:
+        dist = (float(last_1h["close"]) - float(last_1h["ema_fast"])) / float(last_1h["ema_fast"]) * 100.0
+        if dist >= 2.0:
+            score += 2.0
+        elif dist >= 1.0:
+            score += 1.5
+        elif dist >= 0.5:
+            score += 1.0
+        else:
+            score += 0.5
+    else:
+        score += 0.5
+
+    # 5) Base quality (0-2): tighter base (lower mean body pct) = better
+    base_mean = float(zone.get("base_body_pct_mean", BASE_MAX_BODY_PCT))
+    if base_mean <= 0.35:
+        score += 2.0
+    elif base_mean <= 0.40:
+        score += 1.5
+    elif base_mean <= 0.45:
+        score += 1.0
+    else:
+        score += 0.5
+
+    score_norm = max(0.0, min(1.0, score / max_score))
+    tp2_rr = float(TP2_RR_MIN) + score_norm * (float(TP2_RR_MAX) - float(TP2_RR_MIN))
+    tp2_rr = max(float(TP2_RR_MIN), min(float(TP2_RR_MAX), tp2_rr))
+    return round(tp2_rr, 2)
 
 # ======================================================
 # TRADE BUILDING + REPORTING
 # ======================================================
 
-def build_trade(ex_name: str, symbol: str, entry: float, zone: Dict[str, Any], df_15m: pd.DataFrame, pump: Dict[str, Any], df_1h: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    last = df_15m.iloc[-1]
-    atr = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
-    if atr <= 0:
-        return None
+def calc_stop(entry: float, zone: Dict[str, Any], last_row: pd.Series) -> float:
+    if STOP_METHOD == "ATR":
+        atr = float(last_row["atr"]) if not pd.isna(last_row["atr"]) else 0.0
+        if atr <= 0:
+            return 0.0
+        return entry - (ATR_STOP_MULT * atr)
 
-    # Wick-based stop - use tap wick low
+    # STRUCT: below tap wick low with buffer
     tap_low = zone.get("tap_low")
     if tap_low is None:
-        tap_low = float(last["low"])
+        tap_low = float(last_row["low"])
     stop = float(tap_low) * (1.0 - WICK_STOP_BUFFER_PCT)
+    return stop
 
+def build_trade(
+    ex_name: str,
+    symbol: str,
+    entry: float,
+    zone: Dict[str, Any],
+    pump: Dict[str, Any],
+    fib: Dict[str, float],
+    df_15m: pd.DataFrame,
+    df_1h: pd.DataFrame
+) -> Optional[Dict[str, Any]]:
+    last = df_15m.iloc[-1]
+    stop = calc_stop(entry, zone, last)
     if stop <= 0 or stop >= entry:
         return None
 
     risk_dist = entry - stop
     tp1 = entry + TP1_RR * risk_dist
-    
-    # Calculate dynamic TP2 based on setup quality
-    tp2_rr = calculate_dynamic_tp2(zone, pump, df_15m, df_1h)
+
+    tp2_rr = calculate_dynamic_tp2_rr(zone, pump, df_15m, df_1h)
     tp2 = entry + tp2_rr * risk_dist
 
-    now = int(time.time())
+    ts_ms = now_ms()
     return {
         "ex_name": ex_name,
         "symbol": symbol,
         "direction": "LONG",
         "entry": float(entry),
         "stop": float(stop),
-        "initial_stop": float(stop),
         "tp1": float(tp1),
         "tp2": float(tp2),
-        "tp2_rr": float(tp2_rr),  # Store the calculated R:R
+        "tp2_rr": float(tp2_rr),
         "tp1_hit": False,
         "tp1_partial_taken": False,
         "breakout_confirmed": False,
-        "breakout_confirm_count": 0,
         "pump_high": float(pump["swing_high"]),
         "status": "PENDING" if ENABLE_BREAKOUT_CONFIRMATION else "ACTIVE",
-        "start_ts": now,
-        "created_ts": now,
+        "start_ts": ts_ms,  # ms
+        "created_ts": ts_ms,
         "zone_created_ts": int(zone["created_ts"]),
     }
 
-def send_signal(trade: Dict[str, Any], zone: Dict[str, Any], pump: Dict[str, Any], fib: Dict[str, float]):
-    utc_now = datetime.now(timezone.utc)
-    central_time = utc_now - timedelta(hours=6)
-    ts = central_time.strftime("%H:%M CT")
-    
-    # Breakout status
-    if ENABLE_BREAKOUT_CONFIRMATION:
-        breakout_status = "⏳ PENDING BREAKOUT CONFIRMATION"
-    else:
-        breakout_status = "✅ BREAKOUT CONFIRMED"
-    
-    # Get the dynamic TP2 R:R
-    tp2_rr = trade.get("tp2_rr", 2.5)
-    
+def send_signal(trade: Dict[str, Any]):
+    tp2_rr = float(trade.get("tp2_rr", TP2_RR_MIN))
+    breakout_status = "⏳ PENDING BREAKOUT CONFIRMATION" if ENABLE_BREAKOUT_CONFIRMATION else "✅ BREAKOUT CONFIRMED"
+
     msg = (
         f"📊 {trade['symbol']}\n"
         f"📈 LONG\n"
@@ -780,21 +817,42 @@ def send_signal(trade: Dict[str, Any], zone: Dict[str, Any], pump: Dict[str, Any
         f"📍 ENTRY: {trade['entry']:.6f}\n"
         f"🛑 STOP LOSS: {trade['stop']:.6f}\n\n"
         f"🎯 TAKE PROFIT TARGETS:\n"
-        f"TP1 (1:1): {trade['tp1']:.6f} - Take 25% profit\n"
-        f"TP2 ({tp2_rr:.1f}:1): {trade['tp2']:.6f} - Take remaining 75% (RECOMMENDED)\n\n"
-        f"🕐 {ts} | {trade['ex_name'].upper()}\n\n"
-        "⚠️ Not financial advice. Take trades at your own risk!"
+        f"TP1 (1:1): {trade['tp1']:.6f} - Take {int(TP1_SIZE_PCT*100)}% profit\n"
+        f"TP2 ({tp2_rr:.1f}:1): {trade['tp2']:.6f} - Take remaining {int(TP2_SIZE_PCT*100)}% (RECOMMENDED)\n\n"
+        f"🕐 {ct_time_str()} | {trade['ex_name'].upper()}\n\n"
+        "⚠️ Not financial advice. Info only."
     )
     send_telegram(msg)
-    log.info(f"Signal sent → {trade['ex_name']} {trade['symbol']} CRT15m LONG ({trade['status']}) TP2={tp2_rr:.1f}R")
+    log.info(f"Signal sent → {trade['ex_name']} {trade['symbol']} ({trade['status']}) TP2={tp2_rr:.2f}R")
 
-    trade_key = f"{trade['ex_name']}|{trade['symbol']}|{trade['direction']}|{int(time.time())}"
+    trade_key = f"{trade['ex_name']}|{trade['symbol']}|{trade['direction']}|{trade['start_ts']}"
     with open_trades_lock:
         open_trades[trade_key] = trade
 
 # ======================================================
 # TRACKER + STATS
 # ======================================================
+
+def _best_last_price(ticker: dict) -> float:
+    for k in ("last", "close", "mark"):
+        v = ticker.get(k)
+        if v is not None:
+            try:
+                f = float(v)
+                if f > 0:
+                    return f
+            except Exception:
+                pass
+    bid = ticker.get("bid")
+    ask = ticker.get("ask")
+    try:
+        if bid and ask:
+            bf, af = float(bid), float(ask)
+            if bf > 0 and af > 0:
+                return (bf + af) / 2.0
+    except Exception:
+        pass
+    return 0.0
 
 def _record_closed(trade: Dict[str, Any], outcome: str, exit_price: float):
     with stats_lock:
@@ -804,8 +862,213 @@ def _record_closed(trade: Dict[str, Any], outcome: str, exit_price: float):
             "direction": trade["direction"],
             "outcome": outcome,
             "exit_price": float(exit_price),
-            "tp1_partial_taken": trade.get("tp1_partial_taken", False),
-            "closed_ts": int(time.time()),
+            "tp1_partial_taken": bool(trade.get("tp1_partial_taken", False)),
+            "closed_ts": now_ms(),
         })
 
-        if len(closed_trades) % STATS_BATCH_SIZE == 0
+        if STATS_BATCH_SIZE > 0 and (len(closed_trades) % STATS_BATCH_SIZE == 0):
+            last_n = closed_trades[-STATS_BATCH_SIZE:]
+            wins = sum(1 for x in last_n if x["outcome"] == "WIN")
+            losses = sum(1 for x in last_n if x["outcome"] == "LOSS")
+            total = max(1, len(last_n))
+            send_telegram(
+                f"📊 CRT BOT PERFORMANCE (LAST {STATS_BATCH_SIZE} CLOSED TRADES)\n\n"
+                f"Closed: {total}\n"
+                f"Wins: {wins} ({wins/total*100:.1f}%)\n"
+                f"Losses: {losses} ({losses/total*100:.1f}%)\n\n"
+                "⚠️ Info only. Not financial advice."
+            )
+
+def tracker_loop():
+    log.info("Tracker loop started.")
+    while True:
+        time.sleep(TRACK_INTERVAL)
+
+        with open_trades_lock:
+            keys = list(open_trades.keys())
+
+        for k in keys:
+            try:
+                with open_trades_lock:
+                    t = open_trades.get(k)
+                if not t:
+                    continue
+
+                ex = get_ex_cached(t["ex_name"])
+                if not ex:
+                    continue
+
+                # Always track stop (even if breakout pending)
+                ticker = ex.fetch_ticker(t["symbol"])
+                px = _best_last_price(ticker)
+                if px <= 0:
+                    continue
+
+                stop = float(t["stop"])
+                if px <= stop:
+                    send_telegram(f"❌ SL HIT — {t['symbol']} (LONG) ({t['ex_name']})")
+                    apply_stop_penalty(t["ex_name"], t["symbol"], "LONG")
+                    _record_closed(t, "LOSS", px)
+                    with open_trades_lock:
+                        open_trades.pop(k, None)
+                    continue
+
+                # If pending, check breakout confirmation using fresh 15m candles
+                if t.get("status") == "PENDING":
+                    df_15m = get_df(ex, t["symbol"], "15m")
+                    if df_15m is None or len(df_15m) < 50:
+                        continue
+
+                    if check_breakout_confirmation(df_15m, t):
+                        with open_trades_lock:
+                            if k in open_trades:
+                                open_trades[k]["breakout_confirmed"] = True
+                                open_trades[k]["status"] = "ACTIVE"
+                        send_telegram(f"✅ BREAKOUT CONFIRMED — {t['symbol']} ({t['ex_name']}) now ACTIVE")
+                    else:
+                        continue  # do not process TP while still pending
+
+                # ACTIVE: TP logic
+                tp1 = float(t["tp1"])
+                tp2 = float(t["tp2"])
+
+                if (not t.get("tp1_hit", False)) and px >= tp1:
+                    send_telegram(f"✅ TP1 HIT (1R) — {t['symbol']} ({t['ex_name']})")
+                    with open_trades_lock:
+                        if k in open_trades:
+                            open_trades[k]["tp1_hit"] = True
+                            open_trades[k]["tp1_partial_taken"] = True
+                    continue
+
+                if px >= tp2:
+                    send_telegram(f"🏁 TP2 HIT ({float(t.get('tp2_rr', TP2_RR_MIN)):.1f}R) — {t['symbol']} ({t['ex_name']})")
+                    _record_closed(t, "WIN", px)
+                    with open_trades_lock:
+                        open_trades.pop(k, None)
+                    continue
+
+            except Exception as e:
+                log.error(f"Tracker error {k}: {e}")
+
+# ======================================================
+# MAIN SCANNER LOOP
+# ======================================================
+
+def scanner_loop():
+    send_startup()
+    log.info("Scanner loop started.")
+
+    while True:
+        if in_news_blackout():
+            time.sleep(SCAN_INTERVAL)
+            continue
+
+        for ex_name in EXCHANGES:
+            ex = get_ex_cached(ex_name)
+            if not ex:
+                continue
+
+            movers = detect_top_movers(ex)
+
+            for symbol in movers:
+                try:
+                    df_15m = get_df(ex, symbol, "15m")
+                    df_1h = get_df(ex, symbol, "1h")
+                    if df_15m is None or df_1h is None:
+                        continue
+                    if len(df_15m) < 140 or len(df_1h) < 80:
+                        continue
+
+                    if not ctx_bullish_1h(df_1h):
+                        continue
+                    if not low_vol_ok(df_15m):
+                        continue
+
+                    skey = f"{ex_name}|{symbol}"
+                    st = symbol_state.get(skey, {})
+                    zone = st.get("zone")
+
+                    # Invalidate zone if close below bottom
+                    if zone and not zone.get("invalidated", False):
+                        if zone_invalidated(df_15m, zone):
+                            zone["invalidated"] = True
+                            st["zone"] = zone
+                            st.pop("pump", None)
+                            st.pop("fib", None)
+                            symbol_state[skey] = st
+                            continue
+
+                    # Detect fresh zone if none/invalidated/traded
+                    if not zone or zone.get("invalidated") or zone.get("traded"):
+                        new_zone = detect_demand_zone(df_15m)
+                        if new_zone:
+                            symbol_state[skey] = {"zone": new_zone}
+                        continue
+
+                    # Tap detection (first tap only)
+                    if not zone.get("tapped", False):
+                        if detect_zone_tap(df_15m, zone):
+                            mark_tap(df_15m, zone)
+                            st["zone"] = zone
+                            symbol_state[skey] = st
+                        else:
+                            continue
+
+                    # Reaction update
+                    zone = update_reaction(df_15m, zone)
+                    st["zone"] = zone
+                    symbol_state[skey] = st
+                    if not zone.get("reacted", False):
+                        continue
+
+                    # Pump + fib
+                    pump = st.get("pump")
+                    if not pump:
+                        pump = detect_pump(df_15m)
+                        if pump:
+                            st["pump"] = pump
+                            st["fib"] = fib_levels(pump["swing_low"], pump["swing_high"])
+                            symbol_state[skey] = st
+                        else:
+                            continue
+
+                    fib = st.get("fib")
+                    if not fib:
+                        continue
+
+                    # Entry
+                    if entry_conditions(df_15m, zone, fib):
+                        if not allow(ex_name, symbol, "LONG"):
+                            continue
+
+                        entry_price = float(df_15m["close"].iloc[-1])
+                        trade = build_trade(ex_name, symbol, entry_price, zone, pump, fib, df_15m, df_1h)
+                        if not trade:
+                            continue
+
+                        # Mark zone traded to prevent duplicates
+                        zone["traded"] = True
+                        st["zone"] = zone
+                        symbol_state[skey] = st
+
+                        send_signal(trade)
+
+                except Exception as e:
+                    log.error(f"Scanner error {ex_name} {symbol}: {e}")
+
+        time.sleep(SCAN_INTERVAL)
+
+# ======================================================
+# FLASK SERVER
+# ======================================================
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "CRT 15m BOT RUNNING (OPTION B - BALANCED) — OKX + KUCOIN FUTURES (INFO ONLY)"
+
+if __name__ == "__main__":
+    threading.Thread(target=scanner_loop, daemon=True).start()
+    threading.Thread(target=tracker_loop, daemon=True).start()
+    app.run(host="0.0.0.0", port=PORT)
