@@ -2,17 +2,25 @@
 # CRT 15-MINUTE STRATEGY BOT — OPTION B (BALANCED) + LONG/SHORT
 # OKX + KUCOIN FUTURES • HIGH WIN RATE CONFIGURATION (INFO ONLY)
 #
-# PERFORMANCE HARDENED (1):
-# - Universe cached (default 15m)
-# - Movers from tickers cached (default 2m)
-# - OHLCV cached (15m ttl 30s, 1h ttl 120s) + reduced limits
-# - Avoid duplicate 1h fetches
-# - Symbol state cleanup to prevent memory growth
+# LONGS: Model 2A = Breakout → Retest → Confirm → Enter
+# SHORTS: RSI Divergence + Failure Confirmation
 #
-# RISK/TP SANITY (3):
-# - Tick-aware buffer for stops (min 2 ticks if precision available)
-# - ATR stops respect structure (LONG uses min(ATR, STRUCT); SHORT uses max(ATR, STRUCT))
-# - MIN_RISK_PCT filter to avoid micro-risk noise trades
+# PERF HARDENED:
+# - Universe cached (15m default)
+# - Movers from tickers cached (2m default)
+# - OHLCV cached (15m ttl 30s, 1h ttl 120s) + reduced limits
+# - Symbol state cleanup
+#
+# SHORT NORMALIZATION (micro coins + leverage friendly):
+# - Stop capped as % above entry
+# - TP1/TP2 percent-based (default 8% / 25% drop)
+# - Never negative TP
+#
+# STATS (every 10 CLOSED trades):
+# - TP2 wins
+# - TP1 then SL
+# - SL only
+# - TP1 hit rate + TP2 win rate
 #
 # ⚠️ INFO ONLY. NOT FINANCIAL ADVICE. NO EXECUTION.
 # ======================================================
@@ -34,7 +42,7 @@ from typing import Dict, Any, Optional, List, Tuple
 # ======================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("CRT_15M_OPTION_B_BOTH_DIVSHORTS")
+log = logging.getLogger("CRT_15M_OPTION_B_REWRITE")
 
 # ======================================================
 # TIME HELPERS
@@ -46,7 +54,7 @@ def ct_time_str() -> str:
     return datetime.now(timezone.utc).astimezone(CT).strftime("%H:%M CT")
 
 # ======================================================
-# CONFIG — OPTION B (BALANCED)
+# CONFIG
 # ======================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -94,26 +102,26 @@ ALLOW_ONLY_ACTIVE = os.getenv("ALLOW_ONLY_ACTIVE", "1") == "1"
 TF_EXEC = "15m"
 TF_CTX = "1h"
 
-# Demand/Supply Zone detection — OPTION B
+# Demand Zone detection — OPTION B
 BASE_LOOKBACK = int(os.getenv("BASE_LOOKBACK", 5))
-BASE_MAX_BODY_PCT = float(os.getenv("BASE_MAX_BODY_PCT", 0.45))      # 45% max body avg
+BASE_MAX_BODY_PCT = float(os.getenv("BASE_MAX_BODY_PCT", 0.45))
 DISP_BODY_PCT_MIN = float(os.getenv("DISP_BODY_PCT_MIN", 0.55))
 RANGE_SMA_LEN = int(os.getenv("RANGE_SMA_LEN", 20))
 DISP_RANGE_MULT = float(os.getenv("DISP_RANGE_MULT", 1.5))
 
-# Tap + reaction — OPTION B
+# Tap + reaction
 FIRST_TAP_ONLY = True
-REACTION_R_MULT = float(os.getenv("REACTION_R_MULT", 1.5))           # 1.5R
+REACTION_R_MULT = float(os.getenv("REACTION_R_MULT", 1.5))
 
-# Pump detection — OPTION B (LONGS)
-PUMP_MIN_PCT = float(os.getenv("PUMP_MIN_PCT", 5.0))                 # 5.0%
-PUMP_MAX_PCT = float(os.getenv("PUMP_MAX_PCT", 6.5))                 # 6.5%
+# Pump (LONGS)
+PUMP_MIN_PCT = float(os.getenv("PUMP_MIN_PCT", 5.0))
+PUMP_MAX_PCT = float(os.getenv("PUMP_MAX_PCT", 6.5))
 PUMP_MAX_CANDLES = int(os.getenv("PUMP_MAX_CANDLES", 4))
 BREAK_LOOKBACK = int(os.getenv("BREAK_LOOKBACK", 20))
 
-# Volume filter — OPTION B
+# Volume filter
 ENABLE_LOW_VOL_FILTER = os.getenv("ENABLE_LOW_VOL_FILTER", "1") == "1"
-LOW_VOL_MULT = float(os.getenv("LOW_VOL_MULT", 0.85))                # 85%
+LOW_VOL_MULT = float(os.getenv("LOW_VOL_MULT", 0.85))
 
 # Context EMAs
 CTX_EMA_FAST = int(os.getenv("CTX_EMA_FAST", 20))
@@ -122,16 +130,12 @@ CTX_EMA_SLOW = int(os.getenv("CTX_EMA_SLOW", 50))
 # RSI
 RSI_LEN = int(os.getenv("RSI_LEN", 14))
 
-# -----------------------------
-# LONG ENTRY MODEL: 2A
-# -----------------------------
+# LONG MODEL 2A
 BREAKOUT_CANDLES_REQUIRED = int(os.getenv("BREAKOUT_CANDLES_REQUIRED", 2))
-RETEST_MAX_DIP_PCT = float(os.getenv("RETEST_MAX_DIP_PCT", 0.002))        # 0.2%
-RETEST_TIMEOUT_CANDLES = int(os.getenv("RETEST_TIMEOUT_CANDLES", 12))     # 3h
+RETEST_MAX_DIP_PCT = float(os.getenv("RETEST_MAX_DIP_PCT", 0.002))
+RETEST_TIMEOUT_CANDLES = int(os.getenv("RETEST_TIMEOUT_CANDLES", 12))
 
-# -----------------------------
-# SHORT STRATEGY: Divergence + Failure
-# -----------------------------
+# SHORTS — divergence + failure
 ENABLE_SHORT_DIVERGENCE = os.getenv("ENABLE_SHORT_DIVERGENCE", "1") == "1"
 DIV_LOOKBACK = int(os.getenv("DIV_LOOKBACK", 30))
 DIV_MIN_PRICE_DELTA_PCT = float(os.getenv("DIV_MIN_PRICE_DELTA_PCT", 0.002))
@@ -144,19 +148,21 @@ if FAIL_CONFIRM_MODE not in ("bear_close_below_prev_low", "bear_engulf", "close_
     FAIL_CONFIRM_MODE = "bear_close_below_prev_low"
 
 # Stop buffer (baseline %)
-WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0005))  # 0.05%
+WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0005))
 
-# Stop method
+# Stop method (kept for longs; shorts also respect STRUCT/ATR but then normalize)
 STOP_METHOD = os.getenv("STOP_METHOD", "STRUCT").strip().upper()
 if STOP_METHOD not in ("STRUCT", "ATR"):
     STOP_METHOD = "STRUCT"
+
+# ATR
 ATR_LEN = int(os.getenv("ATR_LEN", 14))
 ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", 1.0))
 
-# MIN risk distance filter (sanity)
+# Min risk distance
 MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", 0.0015))  # 0.15%
 
-# Take profits
+# TPs (LONGS stay RR-based)
 TP1_RR = float(os.getenv("TP1_RR", 1.0))
 TP1_SIZE_PCT = float(os.getenv("TP1_SIZE_PCT", 0.25))
 TP2_SIZE_PCT = float(os.getenv("TP2_SIZE_PCT", 0.75))
@@ -164,7 +170,14 @@ TP2_DYNAMIC = os.getenv("TP2_DYNAMIC", "1") == "1"
 TP2_RR_MIN = float(os.getenv("TP2_RR_MIN", 2.0))
 TP2_RR_MAX = float(os.getenv("TP2_RR_MAX", 4.0))
 
-# Risk level thresholds
+# SHORT normalization (micro coins)
+SHORT_STOP_CAP_PCT = float(os.getenv("SHORT_STOP_CAP_PCT", 0.12))  # cap stop 12% above entry
+SHORT_TP1_PCT = float(os.getenv("SHORT_TP1_PCT", 0.08))            # TP1 8% drop
+SHORT_TP2_PCT = float(os.getenv("SHORT_TP2_PCT", 0.25))            # TP2 25% drop
+SHORT_USE_PCT_TPS = os.getenv("SHORT_USE_PCT_TPS", "1") == "1"
+MIN_TP_PRICE = float(os.getenv("MIN_TP_PRICE", 1e-8))
+
+# Risk labels
 RISK_A_PLUS_MIN = float(os.getenv("RISK_A_PLUS_MIN", 8.0))
 RISK_A_MIN = float(os.getenv("RISK_A_MIN", 6.5))
 RISK_B_MIN = float(os.getenv("RISK_B_MIN", 5.0))
@@ -172,9 +185,9 @@ RISK_B_MIN = float(os.getenv("RISK_B_MIN", 5.0))
 # News blackout (UTC)
 NEWS_BLACKOUT_UTC = os.getenv("NEWS_BLACKOUT_UTC", "").strip()
 
-# Cooldowns (separate by direction)
-WINDOW = int(os.getenv("WINDOW", 1800))                 # 30 min
-STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 7200))  # 2 hours
+# Cooldowns
+WINDOW = int(os.getenv("WINDOW", 1800))
+STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 7200))
 
 # Stats
 STATS_BATCH_SIZE = int(os.getenv("STATS_BATCH_SIZE", 10))
@@ -238,22 +251,10 @@ def send_startup():
     msg = (
         "🤖 CRT 15M BOT STARTED (OPTION B - BALANCED) — LONG+SHORT\n\n"
         "✅ LONGS: Model 2A (Breakout → Retest → Confirm → Enter)\n"
-        "✅ SHORTS: RSI Divergence + Failure Confirmation\n\n"
-        "⚙️ Key Filters:\n"
-        f"• Pump (LONG): {PUMP_MIN_PCT:.1f}%–{PUMP_MAX_PCT:.1f}%\n"
-        f"• Reaction: {REACTION_R_MULT:.1f}R\n"
-        f"• Volume: {int(LOW_VOL_MULT*100)}% of avg\n"
-        f"• Base: <= {int(BASE_MAX_BODY_PCT*100)}% avg body\n\n"
-        "💰 Exits:\n"
-        f"• TP1: 1R ({int(TP1_SIZE_PCT*100)}%)\n"
-        f"• TP2: Dynamic {TP2_RR_MIN:.1f}–{TP2_RR_MAX:.1f}R ({int(TP2_SIZE_PCT*100)}%)\n"
-        f"• Stop buffer: pct + tick-aware (min 2 ticks)\n"
-        f"• Min risk: {MIN_RISK_PCT*100:.2f}%\n\n"
-        "📊 Stats report: every 10 closed trades\n"
-        f"⏱ Cooldowns: {WINDOW//60}m | SL penalty: {STOP_PENALTY_WINDOW//3600}h (separate by direction)\n\n"
-        f"🔄 Exchanges: {', '.join([e.upper() for e in EXCHANGES])}\n"
+        "✅ SHORTS: RSI Divergence + Failure Confirmation (normalized stops/TPs)\n\n"
+        "📊 Stats report: every 10 CLOSED trades (TP2 / TP1→SL / SL only)\n"
         f"🕐 Started: {ct_time_str()}\n\n"
-        "✅ Bot is active and monitoring..."
+        "⚠️ Info only. Not financial advice."
     )
     send_telegram(msg)
 
@@ -945,25 +946,7 @@ def dynamic_tp2_rr(score: float) -> float:
     return round(rr, 2)
 
 # ======================================================
-# TICK-AWARE BUFFER (RISK SANITY)
-# ======================================================
-
-def price_buffer(ex_name: str, ex, symbol: str, price: float, pct: float) -> float:
-    buf = max(0.0, float(price) * float(pct))
-    try:
-        if not ensure_markets_loaded(ex_name, ex):
-            return buf
-        m = ex.market(symbol)  # normalized market dict
-        prec = (m.get("precision") or {}).get("price")
-        if prec is not None:
-            tick_size = 10 ** (-int(prec))
-            buf = max(buf, 2.0 * tick_size)  # min 2 ticks
-    except Exception:
-        pass
-    return buf
-
-# ======================================================
-# TRADE BUILDING (RISK SANITY HARDENED)
+# TRADE BUILDING
 # ======================================================
 
 def build_trade_long(ex_name: str, symbol: str, entry: float, zone: Dict[str, Any], df_15m: pd.DataFrame, pump: Dict[str, Any], df_1h: pd.DataFrame) -> Optional[Dict[str, Any]]:
@@ -972,20 +955,19 @@ def build_trade_long(ex_name: str, symbol: str, entry: float, zone: Dict[str, An
     if atr <= 0:
         return None
 
-    ex = get_ex_cached(ex_name)
     entry = float(entry)
 
     tap_low = zone.get("tap_low")
     if tap_low is None:
         tap_low = float(last["low"])
-    buf = price_buffer(ex_name, ex, symbol, float(tap_low), WICK_STOP_BUFFER_PCT)
-    struct_stop = float(tap_low) - buf
 
+    # STRUCT stop
+    stop = float(tap_low) * (1.0 - WICK_STOP_BUFFER_PCT)
+
+    # ATR stop (optional)
     if STOP_METHOD == "ATR":
         atr_stop = entry - ATR_STOP_MULT * atr
-        stop = min(atr_stop, struct_stop)  # ATR must respect structure (below)
-    else:
-        stop = struct_stop
+        stop = min(stop, atr_stop)  # enforce below structure
 
     if stop <= 0 or stop >= entry:
         return None
@@ -1032,14 +1014,18 @@ def build_trade_short_div(ex_name: str, symbol: str, entry: float, div: Dict[str
     entry = float(entry)
 
     sweep_high = float(div["swing2_high"])
-    buf = price_buffer(ex_name, ex, symbol, sweep_high, WICK_STOP_BUFFER_PCT)
-    struct_stop = sweep_high + buf
 
-    if STOP_METHOD == "ATR":
-        atr_stop = entry + ATR_STOP_MULT * atr
-        stop = max(atr_stop, struct_stop)  # ATR must respect structure (above)
-    else:
-        stop = struct_stop
+    # STRUCT stop: above swing high with buffer
+    struct_stop = sweep_high * (1.0 + WICK_STOP_BUFFER_PCT)
+
+    # ATR stop option
+    atr_stop = entry + ATR_STOP_MULT * atr
+    stop = max(struct_stop, atr_stop) if STOP_METHOD == "ATR" else struct_stop
+
+    # Normalize stop for micro coins: cap distance above entry
+    stop_cap = entry * (1.0 + SHORT_STOP_CAP_PCT)
+    if stop > stop_cap:
+        stop = stop_cap
 
     if stop <= entry:
         return None
@@ -1048,12 +1034,24 @@ def build_trade_short_div(ex_name: str, symbol: str, entry: float, div: Dict[str
     if (risk_dist / entry) < MIN_RISK_PCT:
         return None
 
-    tp1 = entry - TP1_RR * risk_dist
+    # Percent-based take profits (preferred for micro coins + leverage)
+    if SHORT_USE_PCT_TPS:
+        tp1 = max(entry * (1.0 - SHORT_TP1_PCT), MIN_TP_PRICE)
+        tp2 = max(entry * (1.0 - SHORT_TP2_PCT), MIN_TP_PRICE)
+        if tp2 >= tp1:
+            tp2 = max(tp1 * 0.999, MIN_TP_PRICE)
+
+        tp2_rr_effective = round((entry - tp2) / risk_dist, 2)
+    else:
+        tp1 = entry - TP1_RR * risk_dist
+        q_score_tmp = calc_quality_score_short_div(df_15m, df_1h, div)
+        tp2_rr_target = dynamic_tp2_rr(q_score_tmp)
+        tp2 = entry - tp2_rr_target * risk_dist
+        if tp1 <= 0 or tp2 <= 0:
+            return None
+        tp2_rr_effective = tp2_rr_target
 
     q_score = calc_quality_score_short_div(df_15m, df_1h, div)
-    tp2_rr = dynamic_tp2_rr(q_score)
-    tp2 = entry - tp2_rr * risk_dist
-
     risk_txt, grade = risk_label(q_score)
 
     now = int(time.time())
@@ -1067,7 +1065,7 @@ def build_trade_short_div(ex_name: str, symbol: str, entry: float, div: Dict[str
         "tp2": float(tp2),
         "tp1_hit": False,
         "tp1_partial_taken": False,
-        "tp2_rr": float(tp2_rr),
+        "tp2_rr": float(tp2_rr_effective),
         "quality_score": float(q_score),
         "risk_text": risk_txt,
         "risk_grade": grade,
@@ -1095,21 +1093,29 @@ def send_signal(trade: Dict[str, Any]):
     direction = trade["direction"]
     emoji = "📈" if direction == "LONG" else "📉"
 
+    # Show % TP labels for SHORTS (cleaner)
+    if direction == "SHORT" and SHORT_USE_PCT_TPS:
+        tp1_label = f"TP1 ({SHORT_TP1_PCT*100:.0f}%):"
+        tp2_label = f"TP2 ({SHORT_TP2_PCT*100:.0f}%):"
+    else:
+        tp1_label = "TP1 (1R):"
+        tp2_label = f"TP2 ({trade['tp2_rr']:.2f}R):"
+
     msg = (
         f"{emoji} {trade['symbol']}\n"
         f"{direction} — ✅ ENTRY CONFIRMED\n\n"
         f"📍 ENTRY: {trade['entry']:.6f}\n"
         f"🛑 STOP: {trade['stop']:.6f}\n\n"
         f"🎯 TAKE PROFITS:\n"
-        f"TP1 (1R): {trade['tp1']:.6f} — Take {int(TP1_SIZE_PCT*100)}%\n"
-        f"TP2 ({trade['tp2_rr']:.2f}R): {trade['tp2']:.6f} — Take {int(TP2_SIZE_PCT*100)}%\n\n"
+        f"{tp1_label} {trade['tp1']:.6f} — Take {int(TP1_SIZE_PCT*100)}%\n"
+        f"{tp2_label} {trade['tp2']:.6f} — Take {int(TP2_SIZE_PCT*100)}%\n\n"
         f"🧯 RISK: {trade['risk_text']} ({trade['risk_grade']}) | Quality: {trade['quality_score']:.1f}/10\n"
         f"🕐 {ts} | {trade['ex_name'].upper()}\n\n"
         f"{funny}\n\n"
         "⚠️ Not financial advice. Info only."
     )
     send_telegram(msg)
-    log.info(f"Signal sent → {trade['ex_name']} {trade['symbol']} {direction} TP2={trade['tp2_rr']:.2f}R Score={trade['quality_score']:.2f}")
+    log.info(f"Signal sent → {trade['ex_name']} {trade['symbol']} {direction} TP2={trade['tp2_rr']:.2f} Score={trade['quality_score']:.2f}")
 
     trade_key = f"{trade['ex_name']}|{trade['symbol']}|{trade['direction']}|{int(time.time())}"
     with open_trades_lock:
@@ -1136,14 +1142,30 @@ def _record_closed(trade: Dict[str, Any], outcome: str, exit_price: float):
 
         if len(closed_trades) % STATS_BATCH_SIZE == 0:
             last_n = closed_trades[-STATS_BATCH_SIZE:]
-            wins = sum(1 for x in last_n if x["outcome"] == "WIN")
-            losses = sum(1 for x in last_n if x["outcome"] == "LOSS")
-            total = max(1, len(last_n))
+            tp2_wins = 0
+            tp1_then_sl = 0
+            sl_only = 0
+
+            for t in last_n:
+                if t["outcome"] == "WIN":
+                    tp2_wins += 1
+                else:
+                    if t.get("tp1_partial_taken"):
+                        tp1_then_sl += 1
+                    else:
+                        sl_only += 1
+
+            total = len(last_n)
+            tp1_hits = tp2_wins + tp1_then_sl
+
             send_telegram(
                 f"📊 CRT BOT PERFORMANCE (LAST {STATS_BATCH_SIZE} CLOSED TRADES)\n\n"
-                f"Closed: {total}\n"
-                f"Wins: {wins} ({wins/total*100:.1f}%)\n"
-                f"Losses: {losses} ({losses/total*100:.1f}%)\n\n"
+                f"Total closed: {total}\n\n"
+                f"🎯 TP2 (Full Wins): {tp2_wins}\n"
+                f"🟡 TP1 → SL (Partial Wins): {tp1_then_sl}\n"
+                f"❌ SL Only: {sl_only}\n\n"
+                f"📈 TP1 Hit Rate: {tp1_hits / total * 100:.1f}%\n"
+                f"🏆 TP2 Win Rate: {tp2_wins / total * 100:.1f}%\n\n"
                 "⚠️ Info only. Not financial advice."
             )
 
@@ -1176,6 +1198,7 @@ def tracker_loop():
                 tp2 = float(t["tp2"])
                 direction = t["direction"]
 
+                # Stop
                 if direction == "LONG" and px <= stop:
                     send_telegram(f"❌ SL HIT — {t['symbol']} (LONG) ({t['ex_name'].upper()})")
                     apply_stop_penalty(t["ex_name"], t["symbol"], "LONG")
@@ -1192,31 +1215,33 @@ def tracker_loop():
                         open_trades.pop(k, None)
                     continue
 
+                # TP1 partial
                 if not t.get("tp1_hit", False):
                     if direction == "LONG" and px >= tp1:
-                        send_telegram(f"✅ TP1 HIT (1R) — {t['symbol']} (LONG) ({t['ex_name'].upper()})")
+                        send_telegram(f"✅ TP1 HIT — {t['symbol']} (LONG) ({t['ex_name'].upper()})")
                         with open_trades_lock:
                             if k in open_trades:
                                 open_trades[k]["tp1_hit"] = True
                                 open_trades[k]["tp1_partial_taken"] = True
                         continue
                     if direction == "SHORT" and px <= tp1:
-                        send_telegram(f"✅ TP1 HIT (1R) — {t['symbol']} (SHORT) ({t['ex_name'].upper()})")
+                        send_telegram(f"✅ TP1 HIT — {t['symbol']} (SHORT) ({t['ex_name'].upper()})")
                         with open_trades_lock:
                             if k in open_trades:
                                 open_trades[k]["tp1_hit"] = True
                                 open_trades[k]["tp1_partial_taken"] = True
                         continue
 
+                # TP2 close
                 if direction == "LONG" and px >= tp2:
-                    send_telegram(f"🏁 TP2 HIT ({t['tp2_rr']:.2f}R) — {t['symbol']} (LONG) ({t['ex_name'].upper()})")
+                    send_telegram(f"🏁 TP2 HIT — {t['symbol']} (LONG) ({t['ex_name'].upper()})")
                     _record_closed(t, "WIN", px)
                     with open_trades_lock:
                         open_trades.pop(k, None)
                     continue
 
                 if direction == "SHORT" and px <= tp2:
-                    send_telegram(f"🏁 TP2 HIT ({t['tp2_rr']:.2f}R) — {t['symbol']} (SHORT) ({t['ex_name'].upper()})")
+                    send_telegram(f"🏁 TP2 HIT — {t['symbol']} (SHORT) ({t['ex_name'].upper()})")
                     _record_closed(t, "WIN", px)
                     with open_trades_lock:
                         open_trades.pop(k, None)
@@ -1328,7 +1353,7 @@ def scanner_loop():
                                 else:
                                     continue
                             else:
-                                # improve STRUCT stop anchor: keep lowest tap_low while waiting
+                                # keep lowest tap_low while waiting (better STRUCT stops)
                                 zoneL["tap_low"] = min(float(zoneL.get("tap_low", df_15m["low"].iloc[-1])), float(df_15m["low"].iloc[-1]))
                                 stL["zone"] = zoneL
 
@@ -1352,6 +1377,7 @@ def scanner_loop():
 
                             pump_high = float(stL["pump_high"])
 
+                            # Timeout
                             elapsed = (len(df_15m) - 1) - int(stL.get("phase_started_idx", len(df_15m) - 1))
                             if elapsed > RETEST_TIMEOUT_CANDLES:
                                 _reset_side(stL)
@@ -1379,12 +1405,11 @@ def scanner_loop():
                                             _reset_side(stL)
 
                     # -------------------------
-                    # SHORT SIDE (DIVERGENCE + FAILURE)
+                    # SHORT SIDE
                     # -------------------------
                     if TRADE_MODE in ("both", "short_only") and ENABLE_SHORT_DIVERGENCE:
                         stS = st_bucket["SHORT"]
 
-                        # robust anti-refire: mark swing2 as "seen" when detected, not only when traded
                         last_seen_div_ts = int(stS.get("last_seen_div_swing2_ts", 0))
                         last_traded_div_ts = int(stS.get("last_traded_div_swing2_ts", 0))
 
@@ -1405,7 +1430,6 @@ def scanner_loop():
                             if not fail_confirm_short(df_15m, swing2_high):
                                 continue
 
-                            # one trade max per swing2
                             if swing2_ts <= last_traded_div_ts:
                                 continue
 
