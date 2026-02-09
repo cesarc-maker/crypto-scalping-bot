@@ -2,14 +2,8 @@
 # CRT 15-MINUTE STRATEGY BOT — OPTION B (BALANCED) + LONG/SHORT
 # OKX + KUCOIN FUTURES • HIGH WIN RATE CONFIGURATION (INFO ONLY)
 #
-# LONGS: Model 2A = Breakout → Retest → Confirm → Enter
+# LONGS:  Model 2A = Breakout → Retest → Confirm → Enter
 # SHORTS: RSI Divergence + Failure Confirmation
-#
-# PERF HARDENED:
-# - Universe cached (15m default)
-# - Movers from tickers cached (2m default)
-# - OHLCV cached (15m ttl 30s, 1h ttl 120s) + reduced limits
-# - Symbol state cleanup
 #
 # SHORT NORMALIZATION (micro coins + leverage friendly):
 # - Stop capped as % above entry
@@ -21,6 +15,15 @@
 # - TP1 then SL
 # - SL only
 # - TP1 hit rate + TP2 win rate
+#
+# DE-DUPE:
+# - Global 1-hour coin cooldown (no repeat callouts per coin across exchanges/directions)
+#
+# PERF HARDENED:
+# - Universe cached
+# - Movers from tickers cached
+# - OHLCV cached
+# - Symbol state cleanup
 #
 # ⚠️ INFO ONLY. NOT FINANCIAL ADVICE. NO EXECUTION.
 # ======================================================
@@ -42,7 +45,7 @@ from typing import Dict, Any, Optional, List, Tuple
 # ======================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("CRT_15M_OPTION_B_REWRITE")
+log = logging.getLogger("CRT_15M_OPTION_B_REWRITE_V2")
 
 # ======================================================
 # TIME HELPERS
@@ -177,6 +180,9 @@ SHORT_TP2_PCT = float(os.getenv("SHORT_TP2_PCT", 0.25))            # TP2 25% dro
 SHORT_USE_PCT_TPS = os.getenv("SHORT_USE_PCT_TPS", "1") == "1"
 MIN_TP_PRICE = float(os.getenv("MIN_TP_PRICE", 1e-8))
 
+# Global 1-hour coin cooldown (de-dupe)
+COIN_COOLDOWN_SEC = int(os.getenv("COIN_COOLDOWN_SEC", 3600))
+
 # Risk labels
 RISK_A_PLUS_MIN = float(os.getenv("RISK_A_PLUS_MIN", 8.0))
 RISK_A_MIN = float(os.getenv("RISK_A_MIN", 6.5))
@@ -211,6 +217,9 @@ STATE_STALE_AFTER_SEC = int(os.getenv("STATE_STALE_AFTER_SEC", 6 * 60 * 60))
 recent_signals: Dict[str, float] = {}
 penalty_cooldowns: Dict[str, float] = {}
 
+# Global coin cooldown across exchanges/directions
+recent_coin_calls: Dict[str, float] = {}
+
 open_trades: Dict[str, Dict[str, Any]] = {}
 open_trades_lock = threading.Lock()
 
@@ -219,6 +228,23 @@ stats_lock = threading.Lock()
 
 # symbol_state[ex|symbol] -> {"LONG": {...}, "SHORT": {...}, "_last_seen_ts": int}
 symbol_state: Dict[str, Dict[str, Any]] = {}
+
+# ======================================================
+# HELPERS
+# ======================================================
+
+def norm_symbol(symbol: str) -> str:
+    # make stable key across exchanges (strip ':USDT' suffix patterns)
+    return symbol.split(":")[0].strip()
+
+def allow_coin(symbol: str) -> bool:
+    now = time.time()
+    key = norm_symbol(symbol)
+    last = recent_coin_calls.get(key)
+    if last is not None and (now - last) < COIN_COOLDOWN_SEC:
+        return False
+    recent_coin_calls[key] = now
+    return True
 
 # ======================================================
 # TELEGRAM
@@ -252,7 +278,8 @@ def send_startup():
         "🤖 CRT 15M BOT STARTED (OPTION B - BALANCED) — LONG+SHORT\n\n"
         "✅ LONGS: Model 2A (Breakout → Retest → Confirm → Enter)\n"
         "✅ SHORTS: RSI Divergence + Failure Confirmation (normalized stops/TPs)\n\n"
-        "📊 Stats report: every 10 CLOSED trades (TP2 / TP1→SL / SL only)\n"
+        f"🧊 Coin cooldown: {COIN_COOLDOWN_SEC//60} minutes (no repeat callouts)\n"
+        "📊 Stats report: every 10 CLOSED trades (TP2 / TP1→SL / SL only)\n\n"
         f"🕐 Started: {ct_time_str()}\n\n"
         "⚠️ Info only. Not financial advice."
     )
@@ -317,6 +344,8 @@ def apply_stop_penalty(ex_name: str, symbol: str, direction: str):
     key = _cd_key(ex_name, symbol, direction)
     penalty_cooldowns[key] = now + STOP_PENALTY_WINDOW
     recent_signals[key] = now
+    # also prevent immediate re-callout across other exchange/direction
+    recent_coin_calls[norm_symbol(symbol)] = now
 
 # ======================================================
 # TTL CACHES (PERF)
@@ -435,10 +464,10 @@ def ensure_markets_loaded(ex_name: str, ex) -> bool:
         return False
 
 # ======================================================
-# QUALITY UNIVERSE + MOVERS (PERF-HARDENED)
+# QUALITY UNIVERSE + MOVERS
 # ======================================================
 
-def build_quality_universe_from_tickers(ex, markets, tickers) -> list:
+def build_quality_universe_from_tickers(markets, tickers) -> list:
     out = []
     for symbol, t in tickers.items():
         m = markets.get(symbol)
@@ -498,9 +527,8 @@ def get_quality_universe(ex_name: str, ex) -> list:
     try:
         if not ensure_markets_loaded(ex_name, ex):
             return []
-        markets = ex.markets
         tickers = ex.fetch_tickers()
-        pairs = build_quality_universe_from_tickers(ex, markets, tickers)
+        pairs = build_quality_universe_from_tickers(ex.markets, tickers)
         universe_cache.set(key, pairs, UNIVERSE_TTL_SEC)
         return pairs
     except Exception as e:
@@ -614,7 +642,6 @@ def detect_demand_zone(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
         "reacted": False,
         "reaction_high": None,
         "invalidated": False,
-        "traded": False,
     }
 
 def zone_invalidated_long(df_15m: pd.DataFrame, zone: Dict[str, Any]) -> bool:
@@ -815,67 +842,33 @@ def calc_quality_score_long(zone: Dict[str, Any], pump: Dict[str, Any], df_15m: 
     max_score = 10.0
 
     pump_pct = float(pump["move_pct"])
-    if pump_pct >= 6.0:
-        score += 2.0
-    elif pump_pct >= 5.5:
-        score += 1.5
-    elif pump_pct >= 5.0:
-        score += 1.0
-    else:
-        score += 0.5
+    score += 2.0 if pump_pct >= 6.0 else 1.5 if pump_pct >= 5.5 else 1.0 if pump_pct >= 5.0 else 0.5
 
     zone_size = float(zone["top"]) - float(zone["bottom"])
     if zone_size > 0:
         rh = zone.get("reaction_high", float(zone["top"]))
         reaction_r = (float(rh) - float(zone["top"])) / zone_size
-        if reaction_r >= 2.5:
-            score += 2.0
-        elif reaction_r >= 2.0:
-            score += 1.5
-        elif reaction_r >= 1.5:
-            score += 1.0
-        else:
-            score += 0.5
+        score += 2.0 if reaction_r >= 2.5 else 1.5 if reaction_r >= 2.0 else 1.0 if reaction_r >= 1.5 else 0.5
+    else:
+        score += 0.5
 
     last = df_15m.iloc[-1]
     if not pd.isna(last["vol_sma"]) and float(last["vol_sma"]) > 0:
         vr = float(last["volume"]) / float(last["vol_sma"])
-        if vr >= 1.5:
-            score += 2.0
-        elif vr >= 1.2:
-            score += 1.5
-        elif vr >= 1.0:
-            score += 1.0
-        else:
-            score += 0.5
+        score += 2.0 if vr >= 1.5 else 1.5 if vr >= 1.2 else 1.0 if vr >= 1.0 else 0.5
     else:
         score += 0.5
 
     last_1h = df_1h.iloc[-1]
     if not pd.isna(last_1h["ema_fast"]) and float(last_1h["ema_fast"]) > 0:
         dist = (float(last_1h["close"]) - float(last_1h["ema_fast"])) / float(last_1h["ema_fast"]) * 100.0
-        if dist >= 2.0:
-            score += 2.0
-        elif dist >= 1.0:
-            score += 1.5
-        elif dist >= 0.5:
-            score += 1.0
-        else:
-            score += 0.5
+        score += 2.0 if dist >= 2.0 else 1.5 if dist >= 1.0 else 1.0 if dist >= 0.5 else 0.5
     else:
         score += 0.5
 
-    if BASE_MAX_BODY_PCT <= 0.35:
-        score += 2.0
-    elif BASE_MAX_BODY_PCT <= 0.40:
-        score += 1.5
-    elif BASE_MAX_BODY_PCT <= 0.45:
-        score += 1.0
-    else:
-        score += 0.5
+    score += 2.0 if BASE_MAX_BODY_PCT <= 0.35 else 1.5 if BASE_MAX_BODY_PCT <= 0.40 else 1.0 if BASE_MAX_BODY_PCT <= 0.45 else 0.5
 
-    score = max(0.0, min(max_score, score))
-    return round(score, 2)
+    return round(max(0.0, min(max_score, score)), 2)
 
 def calc_quality_score_short_div(df_15m: pd.DataFrame, df_1h: pd.DataFrame, div: Dict[str, Any]) -> float:
     score = 0.0
@@ -885,65 +878,32 @@ def calc_quality_score_short_div(df_15m: pd.DataFrame, df_1h: pd.DataFrame, div:
     price_up = max(0.0, (p2 - p1) / p1 * 100.0)
     rsi_down = max(0.0, (r1 - r2))
 
-    if price_up >= 0.8:
-        score += 2.0
-    elif price_up >= 0.4:
-        score += 1.5
-    else:
-        score += 1.0
-
-    if rsi_down >= 8:
-        score += 2.0
-    elif rsi_down >= 5:
-        score += 1.5
-    else:
-        score += 1.0
+    score += 2.0 if price_up >= 0.8 else 1.5 if price_up >= 0.4 else 1.0
+    score += 2.0 if rsi_down >= 8 else 1.5 if rsi_down >= 5 else 1.0
 
     last = df_15m.iloc[-1]
     if not pd.isna(last["vol_sma"]) and float(last["vol_sma"]) > 0:
         vr = float(last["volume"]) / float(last["vol_sma"])
-        if vr >= 1.5:
-            score += 2.0
-        elif vr >= 1.1:
-            score += 1.5
-        elif vr >= 0.85:
-            score += 1.0
-        else:
-            score += 0.5
+        score += 2.0 if vr >= 1.5 else 1.5 if vr >= 1.1 else 1.0 if vr >= 0.85 else 0.5
     else:
         score += 0.5
 
     last_1h = df_1h.iloc[-1]
     if not pd.isna(last_1h["ema_fast"]) and float(last_1h["ema_fast"]) > 0:
         dist = (float(last_1h["close"]) - float(last_1h["ema_fast"])) / float(last_1h["ema_fast"]) * 100.0
-        if dist >= 2.0:
-            score += 2.0
-        elif dist >= 1.0:
-            score += 1.5
-        elif dist >= 0.5:
-            score += 1.0
-        else:
-            score += 0.5
+        score += 2.0 if dist >= 2.0 else 1.5 if dist >= 1.0 else 1.0 if dist >= 0.5 else 0.5
     else:
         score += 0.5
 
-    if FAIL_CONFIRM_MODE == "bear_engulf":
-        score += 2.0
-    elif FAIL_CONFIRM_MODE == "bear_close_below_prev_low":
-        score += 1.5
-    else:
-        score += 1.0
-
-    score = max(0.0, min(10.0, score))
-    return round(score, 2)
+    score += 2.0 if FAIL_CONFIRM_MODE == "bear_engulf" else 1.5 if FAIL_CONFIRM_MODE == "bear_close_below_prev_low" else 1.0
+    return round(max(0.0, min(10.0, score)), 2)
 
 def dynamic_tp2_rr(score: float) -> float:
     if not TP2_DYNAMIC:
         return float(TP2_RR_MIN)
     score_norm = max(0.0, min(1.0, score / 10.0))
     rr = TP2_RR_MIN + score_norm * (TP2_RR_MAX - TP2_RR_MIN)
-    rr = max(TP2_RR_MIN, min(TP2_RR_MAX, rr))
-    return round(rr, 2)
+    return round(max(TP2_RR_MIN, min(TP2_RR_MAX, rr)), 2)
 
 # ======================================================
 # TRADE BUILDING
@@ -956,18 +916,15 @@ def build_trade_long(ex_name: str, symbol: str, entry: float, zone: Dict[str, An
         return None
 
     entry = float(entry)
-
     tap_low = zone.get("tap_low")
     if tap_low is None:
         tap_low = float(last["low"])
 
-    # STRUCT stop
     stop = float(tap_low) * (1.0 - WICK_STOP_BUFFER_PCT)
 
-    # ATR stop (optional)
     if STOP_METHOD == "ATR":
         atr_stop = entry - ATR_STOP_MULT * atr
-        stop = min(stop, atr_stop)  # enforce below structure
+        stop = min(stop, atr_stop)
 
     if stop <= 0 or stop >= entry:
         return None
@@ -1010,19 +967,14 @@ def build_trade_short_div(ex_name: str, symbol: str, entry: float, div: Dict[str
     if atr <= 0:
         return None
 
-    ex = get_ex_cached(ex_name)
     entry = float(entry)
-
     sweep_high = float(div["swing2_high"])
 
-    # STRUCT stop: above swing high with buffer
     struct_stop = sweep_high * (1.0 + WICK_STOP_BUFFER_PCT)
-
-    # ATR stop option
     atr_stop = entry + ATR_STOP_MULT * atr
     stop = max(struct_stop, atr_stop) if STOP_METHOD == "ATR" else struct_stop
 
-    # Normalize stop for micro coins: cap distance above entry
+    # normalize for micro coins
     stop_cap = entry * (1.0 + SHORT_STOP_CAP_PCT)
     if stop > stop_cap:
         stop = stop_cap
@@ -1034,13 +986,12 @@ def build_trade_short_div(ex_name: str, symbol: str, entry: float, div: Dict[str
     if (risk_dist / entry) < MIN_RISK_PCT:
         return None
 
-    # Percent-based take profits (preferred for micro coins + leverage)
+    # percent-based take profits
     if SHORT_USE_PCT_TPS:
         tp1 = max(entry * (1.0 - SHORT_TP1_PCT), MIN_TP_PRICE)
         tp2 = max(entry * (1.0 - SHORT_TP2_PCT), MIN_TP_PRICE)
         if tp2 >= tp1:
             tp2 = max(tp1 * 0.999, MIN_TP_PRICE)
-
         tp2_rr_effective = round((entry - tp2) / risk_dist, 2)
     else:
         tp1 = entry - TP1_RR * risk_dist
@@ -1093,7 +1044,6 @@ def send_signal(trade: Dict[str, Any]):
     direction = trade["direction"]
     emoji = "📈" if direction == "LONG" else "📉"
 
-    # Show % TP labels for SHORTS (cleaner)
     if direction == "SHORT" and SHORT_USE_PCT_TPS:
         tp1_label = f"TP1 ({SHORT_TP1_PCT*100:.0f}%):"
         tp2_label = f"TP2 ({SHORT_TP2_PCT*100:.0f}%):"
@@ -1115,7 +1065,7 @@ def send_signal(trade: Dict[str, Any]):
         "⚠️ Not financial advice. Info only."
     )
     send_telegram(msg)
-    log.info(f"Signal sent → {trade['ex_name']} {trade['symbol']} {direction} TP2={trade['tp2_rr']:.2f} Score={trade['quality_score']:.2f}")
+    log.info(f"Signal sent → {trade['ex_name']} {trade['symbol']} {direction}")
 
     trade_key = f"{trade['ex_name']}|{trade['symbol']}|{trade['direction']}|{int(time.time())}"
     with open_trades_lock:
@@ -1331,10 +1281,9 @@ def scanner_loop():
                         if not ctx_bullish_1h(df_1h):
                             _reset_side(stL)
                         else:
-                            if zoneL and not zoneL.get("invalidated", False):
-                                if zone_invalidated_long(df_15m, zoneL):
-                                    _reset_side(stL)
-                                    zoneL = None
+                            if zoneL and zone_invalidated_long(df_15m, zoneL):
+                                _reset_side(stL)
+                                zoneL = None
 
                             if not zoneL:
                                 new_zone = detect_demand_zone(df_15m)
@@ -1353,7 +1302,6 @@ def scanner_loop():
                                 else:
                                     continue
                             else:
-                                # keep lowest tap_low while waiting (better STRUCT stops)
                                 zoneL["tap_low"] = min(float(zoneL.get("tap_low", df_15m["low"].iloc[-1])), float(df_15m["low"].iloc[-1]))
                                 stL["zone"] = zoneL
 
@@ -1397,7 +1345,7 @@ def scanner_loop():
                                     send_status(ex_name, symbol, "LONG", "📍 Retest seen — waiting for confirmation candle.")
                             elif phase == "WAIT_CONFIRM":
                                 if confirm_entry_long(df_15m, pump_high):
-                                    if allow_signal(ex_name, symbol, "LONG"):
+                                    if allow_signal(ex_name, symbol, "LONG") and allow_coin(symbol):
                                         entry = float(df_15m["close"].iloc[-1])
                                         trade = build_trade_long(ex_name, symbol, entry, zoneL, df_15m, stL["pump"], df_1h)
                                         if trade:
@@ -1433,7 +1381,7 @@ def scanner_loop():
                             if swing2_ts <= last_traded_div_ts:
                                 continue
 
-                            if allow_signal(ex_name, symbol, "SHORT"):
+                            if allow_signal(ex_name, symbol, "SHORT") and allow_coin(symbol):
                                 entry = float(df_15m["close"].iloc[-1])
                                 trade = build_trade_short_div(ex_name, symbol, entry, div, df_15m, df_1h)
                                 if trade:
