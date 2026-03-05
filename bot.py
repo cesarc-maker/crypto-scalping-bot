@@ -9,6 +9,14 @@
 # 4) Short support proximity filter: avoid shorts too close to 1H swing lows
 # 5) Stricter shorts: MSS impulse requirement + stronger retest rejection structure
 #
+# NEW ADJUSTMENTS (TP1-FIRST LONGS, KEEP TP RATIO):
+# - LOW_VOL_MULT default tightened to 1.05 (requires >= avg volume participation)
+# - CHOP_ATR_PCT_MIN default tightened to 0.0027 (0.27% ATR)
+# - LONG_HEADROOM_MIN_PCT default tightened to 0.014 (1.4% room to recent 1H highs)
+# - LONG_HEADROOM_LOOKBACK_1H default to 72 (3 days of 1H candles)
+# - BASE_MAX_BODY_PCT default tightened to 0.40 (cleaner bases)
+# - PUMP_MIN_PCT default tightened to 5.3 (better impulse -> better TP1 follow-through)
+#
 # Keep structure; settings + small logic tweaks only.
 # ⚠️ INFO ONLY. NOT FINANCIAL ADVICE. NO EXECUTION.
 # ======================================================
@@ -30,7 +38,7 @@ from typing import Dict, Any, Optional, List, Tuple
 # ======================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("CRT_15M_OPTION_B_REWRITE_V4_PRIORITIES")
+log = logging.getLogger("CRT_15M_OPTION_B_REWRITE_V5_TP1_FIRST")
 
 # ======================================================
 # TIME HELPERS
@@ -92,7 +100,7 @@ TF_CTX = "1h"
 
 # Demand Zone detection — OPTION B
 BASE_LOOKBACK = int(os.getenv("BASE_LOOKBACK", 5))
-BASE_MAX_BODY_PCT = float(os.getenv("BASE_MAX_BODY_PCT", 0.45))
+BASE_MAX_BODY_PCT = float(os.getenv("BASE_MAX_BODY_PCT", 0.40))  # tightened (was 0.45)
 DISP_BODY_PCT_MIN = float(os.getenv("DISP_BODY_PCT_MIN", 0.55))
 RANGE_SMA_LEN = int(os.getenv("RANGE_SMA_LEN", 20))
 DISP_RANGE_MULT = float(os.getenv("DISP_RANGE_MULT", 1.5))
@@ -102,14 +110,14 @@ FIRST_TAP_ONLY = True
 REACTION_R_MULT = float(os.getenv("REACTION_R_MULT", 1.5))
 
 # Pump (LONGS)
-PUMP_MIN_PCT = float(os.getenv("PUMP_MIN_PCT", 5.0))
+PUMP_MIN_PCT = float(os.getenv("PUMP_MIN_PCT", 5.3))  # tightened (was 5.0)
 PUMP_MAX_PCT = float(os.getenv("PUMP_MAX_PCT", 6.5))
 PUMP_MAX_CANDLES = int(os.getenv("PUMP_MAX_CANDLES", 4))
 BREAK_LOOKBACK = int(os.getenv("BREAK_LOOKBACK", 20))
 
 # Volume filter
 ENABLE_LOW_VOL_FILTER = os.getenv("ENABLE_LOW_VOL_FILTER", "1") == "1"
-LOW_VOL_MULT = float(os.getenv("LOW_VOL_MULT", 0.85))
+LOW_VOL_MULT = float(os.getenv("LOW_VOL_MULT", 1.05))  # tightened (was 0.85)
 
 # Context EMAs
 CTX_EMA_FAST = int(os.getenv("CTX_EMA_FAST", 20))
@@ -135,21 +143,21 @@ DIV_RSI_OVERBOUGHT_LEVEL = float(os.getenv("DIV_RSI_OVERBOUGHT_LEVEL", 65))
 # PRIORITY #2 — 15m CHOP FILTER (ATR% FLOOR)
 # ======================================================
 ENABLE_CHOP_FILTER = os.getenv("ENABLE_CHOP_FILTER", "1") == "1"
-CHOP_ATR_PCT_MIN = float(os.getenv("CHOP_ATR_PCT_MIN", 0.0025))  # 0.25% baseline; tune per universe
+CHOP_ATR_PCT_MIN = float(os.getenv("CHOP_ATR_PCT_MIN", 0.0027))  # tightened (was 0.0025)
 
 # ======================================================
 # PRIORITY #3 — LONG HEADROOM FILTER (1H RESISTANCE ROOM)
 # ======================================================
 ENABLE_LONG_HEADROOM_FILTER = os.getenv("ENABLE_LONG_HEADROOM_FILTER", "1") == "1"
-LONG_HEADROOM_LOOKBACK_1H = int(os.getenv("LONG_HEADROOM_LOOKBACK_1H", 48))
-LONG_HEADROOM_MIN_PCT = float(os.getenv("LONG_HEADROOM_MIN_PCT", 0.012))  # 1.2% room to recent 1H highs
+LONG_HEADROOM_LOOKBACK_1H = int(os.getenv("LONG_HEADROOM_LOOKBACK_1H", 72))  # tightened (was 48)
+LONG_HEADROOM_MIN_PCT = float(os.getenv("LONG_HEADROOM_MIN_PCT", 0.014))     # tightened (was 0.012)
 
 # ======================================================
 # PRIORITY #4 — SHORT SUPPORT PROXIMITY FILTER (avoid late shorts)
 # ======================================================
 ENABLE_SHORT_SUPPORT_FILTER = os.getenv("ENABLE_SHORT_SUPPORT_FILTER", "1") == "1"
 SHORT_SUPPORT_LOOKBACK_1H = int(os.getenv("SHORT_SUPPORT_LOOKBACK_1H", 72))
-SHORT_SUPPORT_NEAR_PCT = float(os.getenv("SHORT_SUPPORT_NEAR_PCT", 0.01))  # within 1% of recent 1H low => skip
+SHORT_SUPPORT_NEAR_PCT = float(os.getenv("SHORT_SUPPORT_NEAR_PCT", 0.01))
 
 # ======================================================
 # SHORTS — HIGH WIN RATE SETTINGS (MSS + Retest-only + Bear Regime)
@@ -161,37 +169,28 @@ SHORT_ENTRY_MODE = os.getenv("SHORT_ENTRY_MODE", "retest_only").strip().lower()
 if SHORT_ENTRY_MODE not in ("trigger", "retest_only"):
     SHORT_ENTRY_MODE = "retest_only"
 
-# reduce “micro-noise” divergences
 DIV_MIN_SWING_SEPARATION = int(os.getenv("DIV_MIN_SWING_SEPARATION", 6))
 
-# MSS/retest
-SHORT_RETEST_MAX_ABOVE_PIVOT_PCT = float(os.getenv("SHORT_RETEST_MAX_ABOVE_PIVOT_PCT", 0.0015))  # 0.15% poke above pivot allowed
+SHORT_RETEST_MAX_ABOVE_PIVOT_PCT = float(os.getenv("SHORT_RETEST_MAX_ABOVE_PIVOT_PCT", 0.0015))
 SHORT_RETEST_TIMEOUT_CANDLES = int(os.getenv("SHORT_RETEST_TIMEOUT_CANDLES", 10))
 
-# Require participation on trigger/retest candle
 SHORT_REQUIRE_TRIGGER_VOL = os.getenv("SHORT_REQUIRE_TRIGGER_VOL", "1") == "1"
 SHORT_TRIGGER_VOL_MULT = float(os.getenv("SHORT_TRIGGER_VOL_MULT", 1.1))
 
-# After TP1: move SL to break-even (+ fee buffer)
 SHORT_MOVE_SL_TO_BE_AFTER_TP1 = os.getenv("SHORT_MOVE_SL_TO_BE_AFTER_TP1", "1") == "1"
-SHORT_BE_BUFFER_PCT = float(os.getenv("SHORT_BE_BUFFER_PCT", 0.0002))  # +0.02%
+SHORT_BE_BUFFER_PCT = float(os.getenv("SHORT_BE_BUFFER_PCT", 0.0002))
 
-# Stop buffer (baseline %)
 WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0005))
 
-# Stop method
 STOP_METHOD = os.getenv("STOP_METHOD", "STRUCT").strip().upper()
 if STOP_METHOD not in ("STRUCT", "ATR"):
     STOP_METHOD = "STRUCT"
 
-# ATR
 ATR_LEN = int(os.getenv("ATR_LEN", 14))
 ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", 1.0))
 
-# Min risk distance
-MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", 0.0015))  # 0.15%
+MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", 0.0015))
 
-# TPs (LONGS stay RR-based)
 TP1_RR = float(os.getenv("TP1_RR", 1.0))
 TP1_SIZE_PCT = float(os.getenv("TP1_SIZE_PCT", 0.25))
 TP2_SIZE_PCT = float(os.getenv("TP2_SIZE_PCT", 0.75))
@@ -199,32 +198,25 @@ TP2_DYNAMIC = os.getenv("TP2_DYNAMIC", "1") == "1"
 TP2_RR_MIN = float(os.getenv("TP2_RR_MIN", 2.0))
 TP2_RR_MAX = float(os.getenv("TP2_RR_MAX", 4.0))
 
-# SHORT normalization (micro coins)
-SHORT_STOP_CAP_PCT = float(os.getenv("SHORT_STOP_CAP_PCT", 0.12))  # cap stop 12% above entry
-SHORT_TP1_PCT = float(os.getenv("SHORT_TP1_PCT", 0.08))            # TP1 8% drop
-SHORT_TP2_PCT = float(os.getenv("SHORT_TP2_PCT", 0.25))            # TP2 25% drop
+SHORT_STOP_CAP_PCT = float(os.getenv("SHORT_STOP_CAP_PCT", 0.12))
+SHORT_TP1_PCT = float(os.getenv("SHORT_TP1_PCT", 0.08))
+SHORT_TP2_PCT = float(os.getenv("SHORT_TP2_PCT", 0.25))
 SHORT_USE_PCT_TPS = os.getenv("SHORT_USE_PCT_TPS", "1") == "1"
 MIN_TP_PRICE = float(os.getenv("MIN_TP_PRICE", 1e-8))
 
-# Global 1-hour coin cooldown (de-dupe)
 COIN_COOLDOWN_SEC = int(os.getenv("COIN_COOLDOWN_SEC", 3600))
 
-# Risk labels
 RISK_A_PLUS_MIN = float(os.getenv("RISK_A_PLUS_MIN", 8.0))
 RISK_A_MIN = float(os.getenv("RISK_A_MIN", 6.5))
 RISK_B_MIN = float(os.getenv("RISK_B_MIN", 5.0))
 
-# News blackout (UTC)
 NEWS_BLACKOUT_UTC = os.getenv("NEWS_BLACKOUT_UTC", "").strip()
 
-# Cooldowns
 WINDOW = int(os.getenv("WINDOW", 1800))
 STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 7200))
 
-# Stats
 STATS_BATCH_SIZE = int(os.getenv("STATS_BATCH_SIZE", 10))
 
-# Cache controls
 UNIVERSE_TTL_SEC = int(os.getenv("UNIVERSE_TTL_SEC", 15 * 60))
 MOVERS_TTL_SEC = int(os.getenv("MOVERS_TTL_SEC", 120))
 OHLCV_15M_TTL_SEC = int(os.getenv("OHLCV_15M_TTL_SEC", 30))
@@ -232,7 +224,6 @@ OHLCV_1H_TTL_SEC = int(os.getenv("OHLCV_1H_TTL_SEC", 120))
 OHLCV_LIMIT_15M = int(os.getenv("OHLCV_LIMIT_15M", 160))
 OHLCV_LIMIT_1H = int(os.getenv("OHLCV_LIMIT_1H", 120))
 
-# State cleanup
 STATE_CLEANUP_EVERY_SEC = int(os.getenv("STATE_CLEANUP_EVERY_SEC", 15 * 60))
 STATE_STALE_AFTER_SEC = int(os.getenv("STATE_STALE_AFTER_SEC", 6 * 60 * 60))
 
@@ -243,7 +234,6 @@ STATE_STALE_AFTER_SEC = int(os.getenv("STATE_STALE_AFTER_SEC", 6 * 60 * 60))
 recent_signals: Dict[str, float] = {}
 penalty_cooldowns: Dict[str, float] = {}
 
-# Global coin cooldown across exchanges/directions
 recent_coin_calls: Dict[str, float] = {}
 
 open_trades: Dict[str, Dict[str, Any]] = {}
@@ -252,7 +242,6 @@ open_trades_lock = threading.Lock()
 closed_trades: List[Dict[str, Any]] = []
 stats_lock = threading.Lock()
 
-# symbol_state[ex|symbol] -> {"LONG": {...}, "SHORT": {...}, "_last_seen_ts": int}
 symbol_state: Dict[str, Dict[str, Any]] = {}
 
 # ======================================================
@@ -305,7 +294,8 @@ def send_startup():
         "✅ SHORTS: HI-WIN (1H Bear Regime + Divergence → MSS → Retest Rejection)\n\n"
         f"🧊 Coin cooldown: {COIN_COOLDOWN_SEC//60} minutes (no repeat callouts)\n"
         f"🧹 Chop filter: {'ON' if ENABLE_CHOP_FILTER else 'OFF'} (ATR% ≥ {CHOP_ATR_PCT_MIN*100:.2f}%)\n"
-        f"📈 Long headroom filter: {'ON' if ENABLE_LONG_HEADROOM_FILTER else 'OFF'} (≥ {LONG_HEADROOM_MIN_PCT*100:.2f}% room)\n"
+        f"📈 Long headroom: {'ON' if ENABLE_LONG_HEADROOM_FILTER else 'OFF'} (≥ {LONG_HEADROOM_MIN_PCT*100:.2f}% room, {LONG_HEADROOM_LOOKBACK_1H}h)\n"
+        f"📈 Long volume participation: {'ON' if ENABLE_LOW_VOL_FILTER else 'OFF'} (vol ≥ {LOW_VOL_MULT:.2f}× SMA)\n"
         f"📉 Short support filter: {'ON' if ENABLE_SHORT_SUPPORT_FILTER else 'OFF'} (skip within {SHORT_SUPPORT_NEAR_PCT*100:.2f}% of 1H low)\n"
         "📊 Stats report: every 10 CLOSED trades (TP2 / GREEN / LOSS)\n\n"
         f"🕐 Started: {ct_time_str()}\n\n"
@@ -429,7 +419,6 @@ def add_indicators_15m(df: pd.DataFrame) -> pd.DataFrame:
     df["vol_sma"] = df["volume"].rolling(20).mean()
     df["rsi"] = _rsi(df["close"], RSI_LEN)
 
-    # PRIORITY #2: chop proxy metrics
     df["atr_pct"] = df["atr"] / df["close"]
     df["range_sma_pct"] = df["range_sma"] / df["close"]
     return df
@@ -802,7 +791,6 @@ def breakout_confirmed_long(df_15m: pd.DataFrame, pump_high: float) -> bool:
         return False
     return all(c > pump_high for c in closes)
 
-# TIGHTENED retest (quality): must reclaim pump_high + show rejection wick
 def retest_seen_long(df_15m: pd.DataFrame, pump_high: float) -> bool:
     last = df_15m.iloc[-1]
     lo = float(last["low"])
@@ -810,7 +798,7 @@ def retest_seen_long(df_15m: pd.DataFrame, pump_high: float) -> bool:
     c = float(last["close"])
     if lo > pump_high:
         return False
-    if c <= pump_high:  # reclaim required
+    if c <= pump_high:
         return False
     body = abs(c - o)
     lower_wick = min(o, c) - lo
@@ -853,7 +841,6 @@ def trigger_vol_ok(df_15m: pd.DataFrame) -> bool:
         return False
     return float(last["volume"]) >= float(last["vol_sma"]) * SHORT_TRIGGER_VOL_MULT
 
-# PRIORITY #5: stricter MSS: must break pivot by ATR fraction and have real body
 def mss_confirmed_short(df_15m: pd.DataFrame, pivot_low: float) -> bool:
     last = df_15m.iloc[-1]
     c = float(last["close"])
@@ -863,7 +850,6 @@ def mss_confirmed_short(df_15m: pd.DataFrame, pivot_low: float) -> bool:
         return False
     return (c < float(pivot_low) - 0.15 * atr) and (abs(c - o) > 0.25 * atr)
 
-# PRIORITY #5: stronger retest rejection structure
 def retest_reject_short(df_15m: pd.DataFrame, pivot_low: float) -> bool:
     last = df_15m.iloc[-1]
     hi = float(last["high"])
@@ -882,7 +868,7 @@ def retest_reject_short(df_15m: pd.DataFrame, pivot_low: float) -> bool:
     body = abs(c - o)
     upper_wick = hi - max(o, c)
     rng = max(hi - lo, 1e-12)
-    close_pos = (c - lo) / rng  # 0 bottom, 1 top
+    close_pos = (c - lo) / rng
 
     return (upper_wick > body) and (close_pos < 0.3) and trigger_vol_ok(df_15m)
 
@@ -1259,7 +1245,6 @@ def tracker_loop():
                 if direction == "LONG" and px <= stop:
                     send_telegram(f"❌ SL HIT — {t['symbol']} (LONG) ({t['ex_name'].upper()})")
                     apply_stop_penalty(t["ex_name"], t["symbol"], "LONG")
-                    # PRIORITY #1: if TP1 was hit, call it GREEN not LOSS
                     outcome = "GREEN" if t.get("tp1_partial_taken") else "LOSS"
                     _record_closed(t, outcome, px)
                     with open_trades_lock:
@@ -1292,7 +1277,6 @@ def tracker_loop():
                                 open_trades[k]["tp1_hit"] = True
                                 open_trades[k]["tp1_partial_taken"] = True
 
-                                # HI-WIN: move SL to breakeven after TP1
                                 if SHORT_MOVE_SL_TO_BE_AFTER_TP1:
                                     entry = float(open_trades[k]["entry"])
                                     be = entry * (1.0 + SHORT_BE_BUFFER_PCT)
@@ -1386,7 +1370,6 @@ def scanner_loop():
                     if not low_vol_ok(df_15m):
                         continue
 
-                    # PRIORITY #2: chop filter
                     if not chop_ok(df_15m):
                         continue
 
@@ -1468,7 +1451,6 @@ def scanner_loop():
                                 if confirm_entry_long(df_15m, pump_high):
                                     entry = float(df_15m["close"].iloc[-1])
 
-                                    # PRIORITY #3: headroom filter
                                     if ENABLE_LONG_HEADROOM_FILTER and not has_headroom_1h(
                                         df_1h, entry, LONG_HEADROOM_LOOKBACK_1H, LONG_HEADROOM_MIN_PCT
                                     ):
@@ -1509,7 +1491,6 @@ def scanner_loop():
                         pivot_low = float(stS["pivot_low"])
                         phase = stS.get("phase", "WAIT_MSS")
 
-                        # Step 1: MSS impulse + volume ok
                         if phase == "WAIT_MSS":
                             if mss_confirmed_short(df_15m, pivot_low) and trigger_vol_ok(df_15m):
                                 stS["phase"] = "WAIT_RETEST" if SHORT_ENTRY_MODE == "retest_only" else "TRIGGER_ENTRY"
@@ -1518,17 +1499,14 @@ def scanner_loop():
                             else:
                                 continue
 
-                        # Timeout control
                         elapsed = (len(df_15m) - 1) - int(stS.get("phase_started_idx", len(df_15m) - 1))
                         if elapsed > SHORT_RETEST_TIMEOUT_CANDLES:
                             _reset_side(stS)
                             continue
 
-                        # Trigger entry (optional)
                         if stS.get("phase") == "TRIGGER_ENTRY":
                             entry = float(df_15m["close"].iloc[-1])
 
-                            # PRIORITY #4: avoid late shorts near 1H support
                             if ENABLE_SHORT_SUPPORT_FILTER and near_support_1h(
                                 df_1h, entry, SHORT_SUPPORT_LOOKBACK_1H, SHORT_SUPPORT_NEAR_PCT
                             ):
@@ -1543,14 +1521,12 @@ def scanner_loop():
                                     _reset_side(stS)
                             continue
 
-                        # Retest-only entry (HI WIN RATE)
                         if stS.get("phase") == "WAIT_RETEST":
                             if not retest_reject_short(df_15m, pivot_low):
                                 continue
 
                             entry = float(df_15m["close"].iloc[-1])
 
-                            # PRIORITY #4: avoid late shorts near 1H support
                             if ENABLE_SHORT_SUPPORT_FILTER and near_support_1h(
                                 df_1h, entry, SHORT_SUPPORT_LOOKBACK_1H, SHORT_SUPPORT_NEAR_PCT
                             ):
@@ -1577,7 +1553,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "CRT 15m STRATEGY BOT RUNNING (INFO ONLY) — OPTION B BALANCED (PRIORITY WIN-RATE TWEAKS APPLIED)"
+    return "CRT 15m STRATEGY BOT RUNNING (INFO ONLY) — OPTION B BALANCED (TP1-FIRST LONG TUNING APPLIED)"
 
 if __name__ == "__main__":
     threading.Thread(target=scanner_loop, daemon=True).start()
