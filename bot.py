@@ -2,27 +2,22 @@
 # CRT 15-MINUTE STRATEGY BOT — OPTION B (BALANCED) + LONG/SHORT
 # OKX + KUCOIN FUTURES • HIGH WIN RATE CONFIGURATION (INFO ONLY)
 #
-# PRIORITY ORDER APPLIED (WIN-RATE IMPROVEMENTS):
-# 1) Metrics fix: track GREEN (TP1 hit then stopped) separately from LOSS; report TP1+ green-rate + TP2-rate
-# 2) 15m chop filter: ATR% floor (blocks low-energy noise)
-# 3) Long headroom filter: require room to 1H resistance (prevents buying into nearby highs)
-# 4) Short support proximity filter: avoid shorts too close to 1H swing lows
-# 5) Stricter shorts: MSS impulse requirement + stronger retest rejection structure
+# INCLUDED:
+# - LONGS: Breakout -> Retest -> Confirm -> Enter
+# - SHORTS: 1H Bear Regime + Divergence -> MSS -> Retest Rejection
+# - TP1-first long tuning
+# - Trade lifecycle updates
+# - Trade IDs
+# - Structured trade cards
+# - Analytics + recap engine
+# - Optimization suggestions
 #
-# NEW ADJUSTMENTS (TP1-FIRST LONGS, KEEP TP RATIO):
-# - LOW_VOL_MULT default tightened to 1.05 (requires >= avg volume participation)
-# - CHOP_ATR_PCT_MIN default tightened to 0.0027 (0.27% ATR)
-# - LONG_HEADROOM_MIN_PCT default tightened to 0.014 (1.4% room to recent 1H highs)
-# - LONG_HEADROOM_LOOKBACK_1H default to 72 (3 days of 1H candles)
-# - BASE_MAX_BODY_PCT default tightened to 0.40 (cleaner bases)
-# - PUMP_MIN_PCT default tightened to 5.3 (better impulse -> better TP1 follow-through)
-#
-# Keep structure; settings + small logic tweaks only.
 # ⚠️ INFO ONLY. NOT FINANCIAL ADVICE. NO EXECUTION.
 # ======================================================
 
 import os
 import time
+import math
 import ccxt
 import pandas as pd
 import threading
@@ -38,7 +33,7 @@ from typing import Dict, Any, Optional, List, Tuple
 # ======================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("CRT_15M_OPTION_B_REWRITE_V5_TP1_FIRST")
+log = logging.getLogger("CRT_15M_OPTION_B_V6_LIFECYCLE_ANALYTICS")
 
 # ======================================================
 # TIME HELPERS
@@ -48,6 +43,9 @@ CT = ZoneInfo("America/Chicago")
 
 def ct_time_str() -> str:
     return datetime.now(timezone.utc).astimezone(CT).strftime("%H:%M CT")
+
+def utc_ts() -> int:
+    return int(time.time())
 
 # ======================================================
 # CONFIG
@@ -80,7 +78,7 @@ TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 10))
 # Exchanges (ONLY OKX + KuCoin Futures)
 EXCHANGES = os.getenv("EXCHANGES", "okx,kucoin_futures").split(",")
 EXCHANGES = [e.strip() for e in EXCHANGES if e.strip()]
-EXCHANGES = [e for e in EXCHANGES if e in ("okx", "kucoin_futures")]  # hard clamp
+EXCHANGES = [e for e in EXCHANGES if e in ("okx", "kucoin_futures")]
 
 # Trade mode
 TRADE_MODE = os.getenv("TRADE_MODE", "both").strip().lower()
@@ -98,9 +96,9 @@ ALLOW_ONLY_ACTIVE = os.getenv("ALLOW_ONLY_ACTIVE", "1") == "1"
 TF_EXEC = "15m"
 TF_CTX = "1h"
 
-# Demand Zone detection — OPTION B
+# Demand Zone detection
 BASE_LOOKBACK = int(os.getenv("BASE_LOOKBACK", 5))
-BASE_MAX_BODY_PCT = float(os.getenv("BASE_MAX_BODY_PCT", 0.40))  # tightened (was 0.45)
+BASE_MAX_BODY_PCT = float(os.getenv("BASE_MAX_BODY_PCT", 0.40))  # tightened
 DISP_BODY_PCT_MIN = float(os.getenv("DISP_BODY_PCT_MIN", 0.55))
 RANGE_SMA_LEN = int(os.getenv("RANGE_SMA_LEN", 20))
 DISP_RANGE_MULT = float(os.getenv("DISP_RANGE_MULT", 1.5))
@@ -110,14 +108,14 @@ FIRST_TAP_ONLY = True
 REACTION_R_MULT = float(os.getenv("REACTION_R_MULT", 1.5))
 
 # Pump (LONGS)
-PUMP_MIN_PCT = float(os.getenv("PUMP_MIN_PCT", 5.3))  # tightened (was 5.0)
+PUMP_MIN_PCT = float(os.getenv("PUMP_MIN_PCT", 5.3))  # tightened
 PUMP_MAX_PCT = float(os.getenv("PUMP_MAX_PCT", 6.5))
 PUMP_MAX_CANDLES = int(os.getenv("PUMP_MAX_CANDLES", 4))
 BREAK_LOOKBACK = int(os.getenv("BREAK_LOOKBACK", 20))
 
 # Volume filter
 ENABLE_LOW_VOL_FILTER = os.getenv("ENABLE_LOW_VOL_FILTER", "1") == "1"
-LOW_VOL_MULT = float(os.getenv("LOW_VOL_MULT", 1.05))  # tightened (was 0.85)
+LOW_VOL_MULT = float(os.getenv("LOW_VOL_MULT", 1.05))  # tightened for TP1-first
 
 # Context EMAs
 CTX_EMA_FAST = int(os.getenv("CTX_EMA_FAST", 20))
@@ -131,7 +129,7 @@ BREAKOUT_CANDLES_REQUIRED = int(os.getenv("BREAKOUT_CANDLES_REQUIRED", 2))
 RETEST_MAX_DIP_PCT = float(os.getenv("RETEST_MAX_DIP_PCT", 0.002))
 RETEST_TIMEOUT_CANDLES = int(os.getenv("RETEST_TIMEOUT_CANDLES", 12))
 
-# SHORTS — divergence base
+# Short divergence
 ENABLE_SHORT_DIVERGENCE = os.getenv("ENABLE_SHORT_DIVERGENCE", "1") == "1"
 DIV_LOOKBACK = int(os.getenv("DIV_LOOKBACK", 30))
 DIV_MIN_PRICE_DELTA_PCT = float(os.getenv("DIV_MIN_PRICE_DELTA_PCT", 0.002))
@@ -139,38 +137,27 @@ DIV_MIN_RSI_DELTA = float(os.getenv("DIV_MIN_RSI_DELTA", 2.0))
 DIV_REQUIRE_RSI_OVERBOUGHT = os.getenv("DIV_REQUIRE_RSI_OVERBOUGHT", "0") == "1"
 DIV_RSI_OVERBOUGHT_LEVEL = float(os.getenv("DIV_RSI_OVERBOUGHT_LEVEL", 65))
 
-# ======================================================
-# PRIORITY #2 — 15m CHOP FILTER (ATR% FLOOR)
-# ======================================================
+# Chop filter
 ENABLE_CHOP_FILTER = os.getenv("ENABLE_CHOP_FILTER", "1") == "1"
-CHOP_ATR_PCT_MIN = float(os.getenv("CHOP_ATR_PCT_MIN", 0.0027))  # tightened (was 0.0025)
+CHOP_ATR_PCT_MIN = float(os.getenv("CHOP_ATR_PCT_MIN", 0.0027))
 
-# ======================================================
-# PRIORITY #3 — LONG HEADROOM FILTER (1H RESISTANCE ROOM)
-# ======================================================
+# Long headroom filter
 ENABLE_LONG_HEADROOM_FILTER = os.getenv("ENABLE_LONG_HEADROOM_FILTER", "1") == "1"
-LONG_HEADROOM_LOOKBACK_1H = int(os.getenv("LONG_HEADROOM_LOOKBACK_1H", 72))  # tightened (was 48)
-LONG_HEADROOM_MIN_PCT = float(os.getenv("LONG_HEADROOM_MIN_PCT", 0.014))     # tightened (was 0.012)
+LONG_HEADROOM_LOOKBACK_1H = int(os.getenv("LONG_HEADROOM_LOOKBACK_1H", 72))
+LONG_HEADROOM_MIN_PCT = float(os.getenv("LONG_HEADROOM_MIN_PCT", 0.014))
 
-# ======================================================
-# PRIORITY #4 — SHORT SUPPORT PROXIMITY FILTER (avoid late shorts)
-# ======================================================
+# Short support filter
 ENABLE_SHORT_SUPPORT_FILTER = os.getenv("ENABLE_SHORT_SUPPORT_FILTER", "1") == "1"
 SHORT_SUPPORT_LOOKBACK_1H = int(os.getenv("SHORT_SUPPORT_LOOKBACK_1H", 72))
 SHORT_SUPPORT_NEAR_PCT = float(os.getenv("SHORT_SUPPORT_NEAR_PCT", 0.01))
 
-# ======================================================
-# SHORTS — HIGH WIN RATE SETTINGS (MSS + Retest-only + Bear Regime)
-# ======================================================
-
+# Short execution settings
 SHORT_REQUIRE_1H_BEAR = os.getenv("SHORT_REQUIRE_1H_BEAR", "1") == "1"
-
 SHORT_ENTRY_MODE = os.getenv("SHORT_ENTRY_MODE", "retest_only").strip().lower()
 if SHORT_ENTRY_MODE not in ("trigger", "retest_only"):
     SHORT_ENTRY_MODE = "retest_only"
 
 DIV_MIN_SWING_SEPARATION = int(os.getenv("DIV_MIN_SWING_SEPARATION", 6))
-
 SHORT_RETEST_MAX_ABOVE_PIVOT_PCT = float(os.getenv("SHORT_RETEST_MAX_ABOVE_PIVOT_PCT", 0.0015))
 SHORT_RETEST_TIMEOUT_CANDLES = int(os.getenv("SHORT_RETEST_TIMEOUT_CANDLES", 10))
 
@@ -178,19 +165,21 @@ SHORT_REQUIRE_TRIGGER_VOL = os.getenv("SHORT_REQUIRE_TRIGGER_VOL", "1") == "1"
 SHORT_TRIGGER_VOL_MULT = float(os.getenv("SHORT_TRIGGER_VOL_MULT", 1.1))
 
 SHORT_MOVE_SL_TO_BE_AFTER_TP1 = os.getenv("SHORT_MOVE_SL_TO_BE_AFTER_TP1", "1") == "1"
+LONG_MOVE_SL_TO_BE_AFTER_TP1 = os.getenv("LONG_MOVE_SL_TO_BE_AFTER_TP1", "0") == "1"
 SHORT_BE_BUFFER_PCT = float(os.getenv("SHORT_BE_BUFFER_PCT", 0.0002))
+LONG_BE_BUFFER_PCT = float(os.getenv("LONG_BE_BUFFER_PCT", 0.0002))
 
+# Risk management
 WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0005))
-
 STOP_METHOD = os.getenv("STOP_METHOD", "STRUCT").strip().upper()
 if STOP_METHOD not in ("STRUCT", "ATR"):
     STOP_METHOD = "STRUCT"
 
 ATR_LEN = int(os.getenv("ATR_LEN", 14))
 ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", 1.0))
-
 MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", 0.0015))
 
+# TPs
 TP1_RR = float(os.getenv("TP1_RR", 1.0))
 TP1_SIZE_PCT = float(os.getenv("TP1_SIZE_PCT", 0.25))
 TP2_SIZE_PCT = float(os.getenv("TP2_SIZE_PCT", 0.75))
@@ -198,25 +187,40 @@ TP2_DYNAMIC = os.getenv("TP2_DYNAMIC", "1") == "1"
 TP2_RR_MIN = float(os.getenv("TP2_RR_MIN", 2.0))
 TP2_RR_MAX = float(os.getenv("TP2_RR_MAX", 4.0))
 
+# Optional informational TP3
+ENABLE_INFO_TP3 = os.getenv("ENABLE_INFO_TP3", "1") == "1"
+LONG_TP3_RR = float(os.getenv("LONG_TP3_RR", 5.0))
+SHORT_TP3_PCT = float(os.getenv("SHORT_TP3_PCT", 0.40))
+
+# Short normalization
 SHORT_STOP_CAP_PCT = float(os.getenv("SHORT_STOP_CAP_PCT", 0.12))
 SHORT_TP1_PCT = float(os.getenv("SHORT_TP1_PCT", 0.08))
 SHORT_TP2_PCT = float(os.getenv("SHORT_TP2_PCT", 0.25))
 SHORT_USE_PCT_TPS = os.getenv("SHORT_USE_PCT_TPS", "1") == "1"
 MIN_TP_PRICE = float(os.getenv("MIN_TP_PRICE", 1e-8))
 
-COIN_COOLDOWN_SEC = int(os.getenv("COIN_COOLDOWN_SEC", 3600))
+# Trade card fields
+RISK_PCT_TEXT = os.getenv("RISK_PCT_TEXT", "1%")
+LEVERAGE_TEXT = os.getenv("LEVERAGE_TEXT", "3x isolated")
+POSITION_SIZE_TEXT = os.getenv("POSITION_SIZE_TEXT", "Risk only 1% of account equity")
 
+# Cooldowns
+COIN_COOLDOWN_SEC = int(os.getenv("COIN_COOLDOWN_SEC", 3600))
+WINDOW = int(os.getenv("WINDOW", 1800))
+STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 7200))
+
+# Labels
 RISK_A_PLUS_MIN = float(os.getenv("RISK_A_PLUS_MIN", 8.0))
 RISK_A_MIN = float(os.getenv("RISK_A_MIN", 6.5))
 RISK_B_MIN = float(os.getenv("RISK_B_MIN", 5.0))
 
-NEWS_BLACKOUT_UTC = os.getenv("NEWS_BLACKOUT_UTC", "").strip()
-
-WINDOW = int(os.getenv("WINDOW", 1800))
-STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 7200))
-
+# Stats / recaps
 STATS_BATCH_SIZE = int(os.getenv("STATS_BATCH_SIZE", 10))
 
+# News blackout
+NEWS_BLACKOUT_UTC = os.getenv("NEWS_BLACKOUT_UTC", "").strip()
+
+# Cache controls
 UNIVERSE_TTL_SEC = int(os.getenv("UNIVERSE_TTL_SEC", 15 * 60))
 MOVERS_TTL_SEC = int(os.getenv("MOVERS_TTL_SEC", 120))
 OHLCV_15M_TTL_SEC = int(os.getenv("OHLCV_15M_TTL_SEC", 30))
@@ -224,6 +228,7 @@ OHLCV_1H_TTL_SEC = int(os.getenv("OHLCV_1H_TTL_SEC", 120))
 OHLCV_LIMIT_15M = int(os.getenv("OHLCV_LIMIT_15M", 160))
 OHLCV_LIMIT_1H = int(os.getenv("OHLCV_LIMIT_1H", 120))
 
+# State cleanup
 STATE_CLEANUP_EVERY_SEC = int(os.getenv("STATE_CLEANUP_EVERY_SEC", 15 * 60))
 STATE_STALE_AFTER_SEC = int(os.getenv("STATE_STALE_AFTER_SEC", 6 * 60 * 60))
 
@@ -233,7 +238,6 @@ STATE_STALE_AFTER_SEC = int(os.getenv("STATE_STALE_AFTER_SEC", 6 * 60 * 60))
 
 recent_signals: Dict[str, float] = {}
 penalty_cooldowns: Dict[str, float] = {}
-
 recent_coin_calls: Dict[str, float] = {}
 
 open_trades: Dict[str, Dict[str, Any]] = {}
@@ -249,7 +253,7 @@ symbol_state: Dict[str, Dict[str, Any]] = {}
 # ======================================================
 
 def norm_symbol(symbol: str) -> str:
-    return symbol.split(":")[0].strip()
+    return symbol.split(":")[0].replace("/", "").strip()
 
 def allow_coin(symbol: str) -> bool:
     now = time.time()
@@ -259,6 +263,22 @@ def allow_coin(symbol: str) -> bool:
         return False
     recent_coin_calls[key] = now
     return True
+
+def make_trade_id(ex_name: str, symbol: str, direction: str) -> str:
+    ts = datetime.now(timezone.utc).strftime("%m%d-%H%M")
+    base = norm_symbol(symbol)
+    side = "L" if direction == "LONG" else "S"
+    ex_tag = "OKX" if ex_name == "okx" else "KCF"
+    return f"{base}-{side}-{ex_tag}-{ts}"
+
+def fmt_price(px: float) -> str:
+    if px >= 1000:
+        return f"{px:,.2f}"
+    if px >= 1:
+        return f"{px:.4f}"
+    if px >= 0.01:
+        return f"{px:.6f}"
+    return f"{px:.8f}"
 
 # ======================================================
 # TELEGRAM
@@ -289,15 +309,14 @@ def send_telegram(text: str):
 
 def send_startup():
     msg = (
-        "🤖 CRT 15M BOT STARTED (OPTION B - BALANCED) — LONG+SHORT\n\n"
-        "✅ LONGS: Model 2A (Breakout → Retest → Confirm → Enter)\n"
-        "✅ SHORTS: HI-WIN (1H Bear Regime + Divergence → MSS → Retest Rejection)\n\n"
-        f"🧊 Coin cooldown: {COIN_COOLDOWN_SEC//60} minutes (no repeat callouts)\n"
-        f"🧹 Chop filter: {'ON' if ENABLE_CHOP_FILTER else 'OFF'} (ATR% ≥ {CHOP_ATR_PCT_MIN*100:.2f}%)\n"
-        f"📈 Long headroom: {'ON' if ENABLE_LONG_HEADROOM_FILTER else 'OFF'} (≥ {LONG_HEADROOM_MIN_PCT*100:.2f}% room, {LONG_HEADROOM_LOOKBACK_1H}h)\n"
-        f"📈 Long volume participation: {'ON' if ENABLE_LOW_VOL_FILTER else 'OFF'} (vol ≥ {LOW_VOL_MULT:.2f}× SMA)\n"
-        f"📉 Short support filter: {'ON' if ENABLE_SHORT_SUPPORT_FILTER else 'OFF'} (skip within {SHORT_SUPPORT_NEAR_PCT*100:.2f}% of 1H low)\n"
-        "📊 Stats report: every 10 CLOSED trades (TP2 / GREEN / LOSS)\n\n"
+        "🤖 CRT 15M BOT STARTED — LONG+SHORT\n\n"
+        "✅ LONGS: Breakout → Retest → Confirm → Enter\n"
+        "✅ SHORTS: 1H Bear Regime + Divergence → MSS → Retest Rejection\n"
+        "✅ Lifecycle updates + analytics + optimization suggestions enabled\n\n"
+        f"📈 Long headroom filter: {'ON' if ENABLE_LONG_HEADROOM_FILTER else 'OFF'} ({LONG_HEADROOM_MIN_PCT*100:.2f}% / {LONG_HEADROOM_LOOKBACK_1H}h)\n"
+        f"🧹 Chop filter: {'ON' if ENABLE_CHOP_FILTER else 'OFF'} ({CHOP_ATR_PCT_MIN*100:.2f}% ATR)\n"
+        f"📊 Stats batch: {STATS_BATCH_SIZE} closed trades\n"
+        f"🧊 Coin cooldown: {COIN_COOLDOWN_SEC//60} min\n\n"
         f"🕐 Started: {ct_time_str()}\n\n"
         "⚠️ Info only. Not financial advice."
     )
@@ -330,14 +349,14 @@ BLACKOUTS = _parse_blackouts(NEWS_BLACKOUT_UTC)
 def in_news_blackout() -> bool:
     if not BLACKOUTS:
         return False
-    now = int(datetime.now(timezone.utc).timestamp())
+    now = utc_ts()
     for a, b in BLACKOUTS:
         if a <= now <= b:
             return True
     return False
 
 # ======================================================
-# COOLDOWNS (SEPARATE BY DIRECTION)
+# COOLDOWNS
 # ======================================================
 
 def _cd_key(ex_name: str, symbol: str, direction: str) -> str:
@@ -365,7 +384,7 @@ def apply_stop_penalty(ex_name: str, symbol: str, direction: str):
     recent_coin_calls[norm_symbol(symbol)] = now
 
 # ======================================================
-# TTL CACHES (PERF)
+# TTL CACHE
 # ======================================================
 
 class TTLCache:
@@ -418,7 +437,6 @@ def add_indicators_15m(df: pd.DataFrame) -> pd.DataFrame:
 
     df["vol_sma"] = df["volume"].rolling(20).mean()
     df["rsi"] = _rsi(df["close"], RSI_LEN)
-
     df["atr_pct"] = df["atr"] / df["close"]
     df["range_sma_pct"] = df["range_sma"] / df["close"]
     return df
@@ -633,10 +651,6 @@ def _candle_body_pct(row) -> float:
     body = abs(float(row["close"] - row["open"]))
     return body / rng
 
-# ======================================================
-# PRIORITY #3: LONG HEADROOM + PRIORITY #4: SHORT SUPPORT PROXIMITY
-# ======================================================
-
 def has_headroom_1h(df_1h: pd.DataFrame, entry: float, lookback: int, min_room_pct: float) -> bool:
     if len(df_1h) < lookback:
         lookback = len(df_1h)
@@ -646,6 +660,14 @@ def has_headroom_1h(df_1h: pd.DataFrame, entry: float, lookback: int, min_room_p
     room = (recent_high - float(entry)) / float(entry)
     return room >= float(min_room_pct)
 
+def calc_headroom_pct_1h(df_1h: pd.DataFrame, entry: float, lookback: int) -> float:
+    if len(df_1h) < lookback:
+        lookback = len(df_1h)
+    if lookback <= 5 or entry <= 0:
+        return 0.0
+    recent_high = float(df_1h["high"].tail(lookback).max())
+    return (recent_high - entry) / entry * 100.0
+
 def near_support_1h(df_1h: pd.DataFrame, entry: float, lookback: int, near_pct: float) -> bool:
     if len(df_1h) < lookback:
         lookback = len(df_1h)
@@ -654,6 +676,14 @@ def near_support_1h(df_1h: pd.DataFrame, entry: float, lookback: int, near_pct: 
     recent_low = float(df_1h["low"].tail(lookback).min())
     dist = (float(entry) - recent_low) / float(entry)
     return dist <= float(near_pct)
+
+def calc_support_distance_pct_1h(df_1h: pd.DataFrame, entry: float, lookback: int) -> float:
+    if len(df_1h) < lookback:
+        lookback = len(df_1h)
+    if lookback <= 5 or entry <= 0:
+        return 0.0
+    recent_low = float(df_1h["low"].tail(lookback).min())
+    return (entry - recent_low) / entry * 100.0
 
 # ======================================================
 # DEMAND ZONE (LONGS)
@@ -777,7 +807,7 @@ def detect_pump_long(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
     return None
 
 # ======================================================
-# LONG ENTRY MODEL 2A HELPERS
+# LONG ENTRY HELPERS
 # ======================================================
 
 def _last_n_closes(df: pd.DataFrame, n: int) -> List[float]:
@@ -809,7 +839,7 @@ def confirm_entry_long(df_15m: pd.DataFrame, pump_high: float) -> bool:
     return float(last["close"]) > pump_high and float(last["close"]) > float(last["open"])
 
 # ======================================================
-# SHORTS — DIVERGENCE + MSS + RETEST (HIGH WIN RATE)
+# SHORTS — DIVERGENCE + MSS + RETEST
 # ======================================================
 
 def _swing_highs(df: pd.DataFrame, lookback: int) -> List[int]:
@@ -869,7 +899,6 @@ def retest_reject_short(df_15m: pd.DataFrame, pivot_low: float) -> bool:
     upper_wick = hi - max(o, c)
     rng = max(hi - lo, 1e-12)
     close_pos = (c - lo) / rng
-
     return (upper_wick > body) and (close_pos < 0.3) and trigger_vol_ok(df_15m)
 
 def detect_bearish_divergence(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
@@ -920,7 +949,7 @@ def detect_bearish_divergence(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
     }
 
 # ======================================================
-# RISK LABEL + DYNAMIC TP2
+# RISK LABEL + QUALITY
 # ======================================================
 
 def risk_label(score: float) -> Tuple[str, str]:
@@ -1000,7 +1029,7 @@ def dynamic_tp2_rr(score: float) -> float:
     return round(max(TP2_RR_MIN, min(TP2_RR_MAX, rr)), 2)
 
 # ======================================================
-# TRADE BUILDING
+# TRADE BUILDERS
 # ======================================================
 
 def build_trade_long(ex_name: str, symbol: str, entry: float, zone: Dict[str, Any], df_15m: pd.DataFrame, pump: Dict[str, Any], df_1h: pd.DataFrame) -> Optional[Dict[str, Any]]:
@@ -1028,22 +1057,26 @@ def build_trade_long(ex_name: str, symbol: str, entry: float, zone: Dict[str, An
         return None
 
     tp1 = entry + TP1_RR * risk_dist
-
     q_score = calc_quality_score_long(zone, pump, df_15m, df_1h)
     tp2_rr = dynamic_tp2_rr(q_score)
     tp2 = entry + tp2_rr * risk_dist
+    tp3 = entry + LONG_TP3_RR * risk_dist if ENABLE_INFO_TP3 else None
 
     risk_txt, grade = risk_label(q_score)
+    now = utc_ts()
 
-    now = int(time.time())
     return {
+        "trade_id": make_trade_id(ex_name, symbol, "LONG"),
         "ex_name": ex_name,
         "symbol": symbol,
         "direction": "LONG",
         "entry": float(entry),
+        "entry_range_low": float(entry * 0.998),
+        "entry_range_high": float(entry * 1.002),
         "stop": float(stop),
         "tp1": float(tp1),
         "tp2": float(tp2),
+        "tp3": float(tp3) if tp3 else None,
         "tp1_hit": False,
         "tp1_partial_taken": False,
         "tp2_rr": float(tp2_rr),
@@ -1053,6 +1086,12 @@ def build_trade_long(ex_name: str, symbol: str, entry: float, zone: Dict[str, An
         "status": "ACTIVE",
         "start_ts": now,
         "created_ts": now,
+        "risk_pct": RISK_PCT_TEXT,
+        "leverage": LEVERAGE_TEXT,
+        "position_size_text": POSITION_SIZE_TEXT,
+        "thesis": "Breakout confirmed, retest held, bullish 1H context, and strong volume participation.",
+        "updates": [],
+        "setup_type": "LONG_BREAKOUT_RETEST",
     }
 
 def build_trade_short_div(ex_name: str, symbol: str, entry: float, div: Dict[str, Any], df_15m: pd.DataFrame, df_1h: pd.DataFrame) -> Optional[Dict[str, Any]]:
@@ -1085,6 +1124,7 @@ def build_trade_short_div(ex_name: str, symbol: str, entry: float, div: Dict[str
         if tp2 >= tp1:
             tp2 = max(tp1 * 0.999, MIN_TP_PRICE)
         tp2_rr_effective = round((entry - tp2) / risk_dist, 2)
+        tp3 = max(entry * (1.0 - SHORT_TP3_PCT), MIN_TP_PRICE) if ENABLE_INFO_TP3 else None
     else:
         tp1 = entry - TP1_RR * risk_dist
         q_score_tmp = calc_quality_score_short_div(df_15m, df_1h, div)
@@ -1093,19 +1133,24 @@ def build_trade_short_div(ex_name: str, symbol: str, entry: float, div: Dict[str
         if tp1 <= 0 or tp2 <= 0:
             return None
         tp2_rr_effective = tp2_rr_target
+        tp3 = entry - LONG_TP3_RR * risk_dist if ENABLE_INFO_TP3 else None
 
     q_score = calc_quality_score_short_div(df_15m, df_1h, div)
     risk_txt, grade = risk_label(q_score)
+    now = utc_ts()
 
-    now = int(time.time())
     return {
+        "trade_id": make_trade_id(ex_name, symbol, "SHORT"),
         "ex_name": ex_name,
         "symbol": symbol,
         "direction": "SHORT",
         "entry": float(entry),
+        "entry_range_low": float(entry * 0.998),
+        "entry_range_high": float(entry * 1.002),
         "stop": float(stop),
         "tp1": float(tp1),
         "tp2": float(tp2),
+        "tp3": float(tp3) if tp3 else None,
         "tp1_hit": False,
         "tp1_partial_taken": False,
         "tp2_rr": float(tp2_rr_effective),
@@ -1115,102 +1160,315 @@ def build_trade_short_div(ex_name: str, symbol: str, entry: float, div: Dict[str
         "status": "ACTIVE",
         "start_ts": now,
         "created_ts": now,
+        "risk_pct": RISK_PCT_TEXT,
+        "leverage": LEVERAGE_TEXT,
+        "position_size_text": POSITION_SIZE_TEXT,
+        "thesis": "Bearish divergence confirmed, MSS broke pivot support, retest rejected, and 1H bearish context remains intact.",
+        "updates": [],
+        "setup_type": "SHORT_DIV_MSS_RETEST",
         "div": div,
     }
 
 # ======================================================
-# TELEGRAM SIGNALS
+# ANALYTICS ENRICHMENT
 # ======================================================
 
-def send_signal(trade: Dict[str, Any]):
-    ts = ct_time_str()
-    funny_lines = [
-        "😂 Stop loss exists because you are not a prophet.",
-        "🧠 Trade the plan, not your emotions.",
-        "🚫 No FOMO. No revenge. Just execution.",
-        "🥤 Hydrate before you click buttons.",
-        "🤖 Be a robot, not a raccoon on energy drinks.",
-    ]
-    funny = funny_lines[int(time.time()) % len(funny_lines)]
+def enrich_trade_analytics(trade: Dict[str, Any], df_15m: pd.DataFrame, df_1h: pd.DataFrame, setup_type: str):
+    last = df_15m.iloc[-1]
 
-    direction = trade["direction"]
-    emoji = "📈" if direction == "LONG" else "📉"
+    vol_ratio = float(last["volume"]) / float(last["vol_sma"]) if float(last["vol_sma"]) > 0 else 0.0
+    atr_pct = (float(last["atr"]) / float(last["close"]) * 100.0) if float(last["close"]) > 0 else 0.0
+    entry = float(trade["entry"])
+    headroom_pct_1h = calc_headroom_pct_1h(df_1h, entry, LONG_HEADROOM_LOOKBACK_1H)
 
-    if direction == "SHORT" and SHORT_USE_PCT_TPS:
-        tp1_label = f"TP1 ({SHORT_TP1_PCT*100:.0f}%):"
-        tp2_label = f"TP2 ({SHORT_TP2_PCT*100:.0f}%):"
-    else:
-        tp1_label = "TP1 (1R):"
-        tp2_label = f"TP2 ({trade['tp2_rr']:.2f}R):"
+    trade["setup_type"] = setup_type
+    trade["features"] = {
+        "vol_ratio": round(vol_ratio, 3),
+        "atr_pct": round(atr_pct, 3),
+        "headroom_pct_1h": round(headroom_pct_1h, 3),
+        "quality_score": trade.get("quality_score", 0),
+    }
 
+    trade["config_snapshot"] = {
+        "LOW_VOL_MULT": LOW_VOL_MULT,
+        "CHOP_ATR_PCT_MIN": CHOP_ATR_PCT_MIN,
+        "LONG_HEADROOM_MIN_PCT": LONG_HEADROOM_MIN_PCT,
+        "LONG_HEADROOM_LOOKBACK_1H": LONG_HEADROOM_LOOKBACK_1H,
+        "BASE_MAX_BODY_PCT": BASE_MAX_BODY_PCT,
+        "PUMP_MIN_PCT": PUMP_MIN_PCT,
+        "TP1_RR": TP1_RR,
+        "TP2_RR_MIN": TP2_RR_MIN,
+        "TP2_RR_MAX": TP2_RR_MAX,
+        "SHORT_TRIGGER_VOL_MULT": SHORT_TRIGGER_VOL_MULT,
+        "SHORT_SUPPORT_NEAR_PCT": SHORT_SUPPORT_NEAR_PCT,
+    }
+
+    trade["analytics"] = {
+        "tp1_hit": False,
+        "tp2_hit": False,
+        "max_favorable": 0.0,
+        "max_adverse": 0.0,
+        "time_to_tp1_sec": None,
+        "time_to_tp2_sec": None,
+    }
+    return trade
+
+def enrich_short_support_feature(trade: Dict[str, Any], df_1h: pd.DataFrame):
+    entry = float(trade["entry"])
+    dist = calc_support_distance_pct_1h(df_1h, entry, SHORT_SUPPORT_LOOKBACK_1H)
+    trade.setdefault("features", {})
+    trade["features"]["distance_to_1h_support_pct"] = round(dist, 3)
+    return trade
+
+# ======================================================
+# TRADE LIFECYCLE MESSAGING
+# ======================================================
+
+def add_trade_event(trade: Dict[str, Any], event_type: str, message: str):
+    trade.setdefault("updates", [])
+    trade["updates"].append({
+        "ts": utc_ts(),
+        "type": event_type,
+        "message": message,
+    })
+
+def send_trade_update(trade: Dict[str, Any], lines: List[str], title: str = "Update"):
     msg = (
-        f"{emoji} {trade['symbol']}\n"
-        f"{direction} — ✅ ENTRY CONFIRMED\n\n"
-        f"📍 ENTRY: {trade['entry']:.6f}\n"
-        f"🛑 STOP: {trade['stop']:.6f}\n\n"
-        f"🎯 TAKE PROFITS:\n"
-        f"{tp1_label} {trade['tp1']:.6f} — Take {int(TP1_SIZE_PCT*100)}%\n"
-        f"{tp2_label} {trade['tp2']:.6f} — Take {int(TP2_SIZE_PCT*100)}%\n\n"
-        f"🧯 RISK: {trade['risk_text']} ({trade['risk_grade']}) | Quality: {trade['quality_score']:.1f}/10\n"
-        f"🕐 {ts} | {trade['ex_name'].upper()}\n\n"
-        f"{funny}\n\n"
-        "⚠️ Not financial advice. Info only."
+        f"🔔 {title}: {trade['symbol']} {trade['direction']}\n"
+        f"Trade ID: {trade['trade_id']}\n\n"
+        + "\n".join(lines)
+        + f"\n\n🕐 {ct_time_str()} | {trade['ex_name'].upper()}\n\n"
+        + "⚠️ Info only. Not financial advice."
     )
     send_telegram(msg)
-    log.info(f"Signal sent → {trade['ex_name']} {trade['symbol']} {direction}")
 
-    trade_key = f"{trade['ex_name']}|{trade['symbol']}|{trade['direction']}|{int(time.time())}"
+def send_signal(trade: Dict[str, Any]):
+    emoji = "📈" if trade["direction"] == "LONG" else "📉"
+    entry_low = min(float(trade["entry_range_low"]), float(trade["entry_range_high"]))
+    entry_high = max(float(trade["entry_range_low"]), float(trade["entry_range_high"]))
+
+    msg = (
+        f"{emoji} Trade Triggered: {trade['symbol']} {trade['direction']}\n"
+        f"Trade ID: {trade['trade_id']}\n\n"
+        f"Entry: {fmt_price(entry_low)}–{fmt_price(entry_high)}\n\n"
+        f"Stop Loss: {fmt_price(float(trade['stop']))}\n\n"
+        f"TP1: {fmt_price(float(trade['tp1']))}\n"
+        f"TP2: {fmt_price(float(trade['tp2']))}\n"
+    )
+
+    if trade.get("tp3") is not None:
+        msg += f"TP3: {fmt_price(float(trade['tp3']))}\n"
+
+    msg += (
+        f"\nRisk: {trade.get('risk_pct', RISK_PCT_TEXT)}\n"
+        f"Leverage: {trade.get('leverage', LEVERAGE_TEXT)}\n"
+        f"Position size: {trade.get('position_size_text', POSITION_SIZE_TEXT)}\n\n"
+        f"Thesis: {trade.get('thesis', 'Structure confirmed with momentum and participation.')}\n\n"
+        f"Quality: {trade['quality_score']:.1f}/10 | Risk: {trade['risk_text']} ({trade['risk_grade']})\n"
+        f"🕐 {ct_time_str()} | {trade['ex_name'].upper()}\n\n"
+        "⚠️ Info only. Not financial advice."
+    )
+    send_telegram(msg)
+    add_trade_event(trade, "TRADE_TRIGGERED", "Trade triggered and trade plan published.")
+    log.info(f"Signal sent → {trade['ex_name']} {trade['symbol']} {trade['direction']}")
+
     with open_trades_lock:
-        open_trades[trade_key] = trade
+        open_trades[trade["trade_id"]] = trade
 
 def send_status(ex_name: str, symbol: str, direction: str, text: str):
     send_telegram(f"ℹ️ {symbol} {direction} ({ex_name.upper()}): {text}")
 
 # ======================================================
-# TRACKER + STATS (PRIORITY #1: METRICS FIX)
+# PERFORMANCE ANALYSIS
+# ======================================================
+
+def analyze_performance(trades: List[Dict[str, Any]]) -> str:
+    if not trades:
+        return "No trades."
+
+    total = len(trades)
+    wins = sum(1 for t in trades if t["outcome"] == "WIN")
+    greens = sum(1 for t in trades if t["outcome"] == "GREEN")
+    losses = sum(1 for t in trades if t["outcome"] == "LOSS")
+    tp1_hits = sum(1 for t in trades if t.get("tp1_hit"))
+
+    avg_vol_win, avg_vol_loss = [], []
+    avg_headroom_win, avg_headroom_loss = [], []
+    avg_support_win, avg_support_loss = [], []
+
+    for t in trades:
+        f = t.get("features", {})
+        if not f:
+            continue
+        if t["outcome"] in ("WIN", "GREEN"):
+            avg_vol_win.append(f.get("vol_ratio", 0))
+            avg_headroom_win.append(f.get("headroom_pct_1h", 0))
+            avg_support_win.append(f.get("distance_to_1h_support_pct", 0))
+        else:
+            avg_vol_loss.append(f.get("vol_ratio", 0))
+            avg_headroom_loss.append(f.get("headroom_pct_1h", 0))
+            avg_support_loss.append(f.get("distance_to_1h_support_pct", 0))
+
+    def avg(x): return sum(x)/len(x) if x else 0.0
+
+    setups: Dict[str, Dict[str, int]] = {}
+    for t in trades:
+        st = t.get("setup_type", "UNKNOWN")
+        setups.setdefault(st, {"total": 0, "green": 0, "win": 0, "loss": 0})
+        setups[st]["total"] += 1
+        if t["outcome"] == "WIN":
+            setups[st]["win"] += 1
+            setups[st]["green"] += 1
+        elif t["outcome"] == "GREEN":
+            setups[st]["green"] += 1
+        else:
+            setups[st]["loss"] += 1
+
+    setup_lines = []
+    for k, v in setups.items():
+        green_rate = (v["green"] / v["total"] * 100.0) if v["total"] else 0.0
+        setup_lines.append(f"- {k}: {green_rate:.1f}% TP1+ green rate ({v['green']}/{v['total']})")
+
+    msg = (
+        f"📊 PERFORMANCE ANALYSIS\n\n"
+        f"Trades: {total}\n"
+        f"Wins: {wins}\n"
+        f"Greens: {greens}\n"
+        f"Losses: {losses}\n\n"
+        f"TP1 Hit Rate: {tp1_hits/total*100:.1f}%\n"
+        f"TP2 Win Rate: {wins/total*100:.1f}%\n\n"
+        f"--- WHAT WORKED ---\n"
+        f"Winning avg vol ratio: {avg(avg_vol_win):.2f}\n"
+        f"Winning avg headroom: {avg(avg_headroom_win):.2f}%\n"
+        f"Winning avg support distance: {avg(avg_support_win):.2f}%\n\n"
+        f"--- WHAT FAILED ---\n"
+        f"Losing avg vol ratio: {avg(avg_vol_loss):.2f}\n"
+        f"Losing avg headroom: {avg(avg_headroom_loss):.2f}%\n"
+        f"Losing avg support distance: {avg(avg_support_loss):.2f}%\n\n"
+        f"--- SETUPS ---\n"
+        + ("\n".join(setup_lines) if setup_lines else "No setup breakdown.")
+    )
+    return msg
+
+def suggest_optimizations(trades: List[Dict[str, Any]]) -> str:
+    if len(trades) < 12:
+        return "🛠 OPTIMIZATION SUGGESTIONS\n\nNot enough closed trades yet for tuning suggestions."
+
+    longs = [t for t in trades if t.get("direction") == "LONG"]
+    shorts = [t for t in trades if t.get("direction") == "SHORT"]
+
+    def avg(vals):
+        vals = [v for v in vals if v is not None]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    suggestions = []
+
+    if longs:
+        long_wins = [t for t in longs if t.get("outcome") in ("WIN", "GREEN")]
+        long_losses = [t for t in longs if t.get("outcome") == "LOSS"]
+
+        win_vol = avg([t.get("features", {}).get("vol_ratio") for t in long_wins])
+        loss_vol = avg([t.get("features", {}).get("vol_ratio") for t in long_losses])
+
+        win_headroom = avg([t.get("features", {}).get("headroom_pct_1h") for t in long_wins])
+        loss_headroom = avg([t.get("features", {}).get("headroom_pct_1h") for t in long_losses])
+
+        win_atr = avg([t.get("features", {}).get("atr_pct") for t in long_wins])
+        loss_atr = avg([t.get("features", {}).get("atr_pct") for t in long_losses])
+
+        long_tp1_rate = sum(1 for t in longs if t.get("tp1_hit")) / len(longs) if longs else 0.0
+
+        if loss_vol and win_vol > loss_vol + 0.12:
+            suggestions.append(
+                f"LONGS: raise LOW_VOL_MULT slightly. Winners had stronger volume than losers ({win_vol:.2f} vs {loss_vol:.2f})."
+            )
+        if loss_headroom and win_headroom > loss_headroom + 0.30:
+            suggestions.append(
+                f"LONGS: tighten LONG_HEADROOM_MIN_PCT. Winners had more 1H room than losers ({win_headroom:.2f}% vs {loss_headroom:.2f}%)."
+            )
+        if loss_atr and win_atr > loss_atr + 0.03:
+            suggestions.append(
+                f"LONGS: raise CHOP_ATR_PCT_MIN a bit. Winners had better 15m expansion than losers ({win_atr:.2f}% vs {loss_atr:.2f}%)."
+            )
+        if long_tp1_rate < 0.55:
+            suggestions.append(
+                "LONGS: TP1 hit rate is weak. Tighten entry quality first: stronger volume, more headroom, cleaner bases."
+            )
+
+    if shorts:
+        short_wins = [t for t in shorts if t.get("outcome") in ("WIN", "GREEN")]
+        short_losses = [t for t in shorts if t.get("outcome") == "LOSS"]
+
+        win_vol = avg([t.get("features", {}).get("vol_ratio") for t in short_wins])
+        loss_vol = avg([t.get("features", {}).get("vol_ratio") for t in short_losses])
+
+        win_support = avg([t.get("features", {}).get("distance_to_1h_support_pct") for t in short_wins])
+        loss_support = avg([t.get("features", {}).get("distance_to_1h_support_pct") for t in short_losses])
+
+        win_atr = avg([t.get("features", {}).get("atr_pct") for t in short_wins])
+        loss_atr = avg([t.get("features", {}).get("atr_pct") for t in short_losses])
+
+        if loss_support and win_support > loss_support + 0.25:
+            suggestions.append(
+                f"SHORTS: tighten support-distance filter. Winners had more room above 1H support than losers ({win_support:.2f}% vs {loss_support:.2f}%)."
+            )
+        if loss_vol and win_vol > loss_vol + 0.10:
+            suggestions.append(
+                f"SHORTS: raise SHORT_TRIGGER_VOL_MULT slightly. Winners had better trigger participation ({win_vol:.2f} vs {loss_vol:.2f})."
+            )
+        if loss_atr and win_atr > loss_atr + 0.03:
+            suggestions.append(
+                f"SHORTS: tighten MSS/retest environment by raising CHOP_ATR_PCT_MIN slightly ({win_atr:.2f}% vs {loss_atr:.2f}%)."
+            )
+
+    mfe_losses = avg([t.get("mfe", 0) for t in trades if t.get("outcome") == "LOSS"])
+    mae_losses = avg([t.get("mae", 0) for t in trades if t.get("outcome") == "LOSS"])
+
+    if mfe_losses < 0.003:
+        suggestions.append("Most losers never moved far in your favor. That usually means entry quality is the problem, not exits.")
+    if mae_losses > 0.010:
+        suggestions.append("Losers are moving too far against entry. Review stop placement and setup invalidation speed.")
+
+    if not suggestions:
+        suggestions.append("No strong optimization signal yet. Keep collecting more trades before changing settings.")
+
+    return "🛠 OPTIMIZATION SUGGESTIONS\n\n" + "\n".join([f"- {s}" for s in suggestions])
+
+# ======================================================
+# TRACKER + STATS
 # ======================================================
 
 def _record_closed(trade: Dict[str, Any], outcome: str, exit_price: float):
-    """
-    outcome:
-      - "WIN"   => TP2 hit
-      - "GREEN" => TP1 hit (partial) then stopped (BE/SL)
-      - "LOSS"  => stopped before TP1
-    """
     with stats_lock:
         closed_trades.append({
+            "trade_id": trade.get("trade_id"),
             "ex": trade["ex_name"],
             "symbol": trade["symbol"],
             "direction": trade["direction"],
-            "outcome": outcome,
+            "setup_type": trade.get("setup_type"),
+            "entry": float(trade["entry"]),
+            "stop": float(trade["stop"]),
+            "tp1": float(trade["tp1"]),
+            "tp2": float(trade["tp2"]),
             "exit_price": float(exit_price),
-            "tp1_partial_taken": trade.get("tp1_partial_taken", False),
-            "tp1_hit": trade.get("tp1_hit", False),
-            "closed_ts": int(time.time()),
+            "quality_score": trade.get("quality_score"),
+            "risk_grade": trade.get("risk_grade"),
+            "features": trade.get("features", {}),
+            "config": trade.get("config_snapshot", {}),
+            "tp1_hit": bool(trade.get("analytics", {}).get("tp1_hit", False)),
+            "tp2_hit": bool(trade.get("analytics", {}).get("tp2_hit", False)),
+            "mfe": float(trade.get("analytics", {}).get("max_favorable", 0.0)),
+            "mae": float(trade.get("analytics", {}).get("max_adverse", 0.0)),
+            "outcome": outcome,
+            "created_ts": trade.get("created_ts"),
+            "closed_ts": utc_ts(),
+            "updates": trade.get("updates", []),
         })
 
         if len(closed_trades) % STATS_BATCH_SIZE == 0:
             last_n = closed_trades[-STATS_BATCH_SIZE:]
-
-            tp2_wins = sum(1 for t in last_n if t["outcome"] == "WIN")
-            greens  = sum(1 for t in last_n if t["outcome"] == "GREEN")
-            losses  = sum(1 for t in last_n if t["outcome"] == "LOSS")
-            total = len(last_n)
-
-            tp1_hits = sum(1 for t in last_n if t.get("tp1_hit") or t.get("tp1_partial_taken"))
-            green_rate = (tp1_hits / total * 100.0) if total else 0.0
-            tp2_rate = (tp2_wins / total * 100.0) if total else 0.0
-
-            send_telegram(
-                f"📊 CRT BOT PERFORMANCE (LAST {STATS_BATCH_SIZE} CLOSED TRADES)\n\n"
-                f"Total closed: {total}\n\n"
-                f"🏆 TP2 (WIN): {tp2_wins}\n"
-                f"🟢 TP1+ (GREEN): {greens}\n"
-                f"❌ LOSS: {losses}\n\n"
-                f"📈 TP1+ Green Rate: {green_rate:.1f}%\n"
-                f"🎯 TP2 Win Rate: {tp2_rate:.1f}%\n\n"
-                "⚠️ Info only. Not financial advice."
-            )
+            send_telegram(analyze_performance(last_n))
+            send_telegram(suggest_optimizations(last_n))
 
 def tracker_loop():
     log.info("Tracker loop started.")
@@ -1236,14 +1494,40 @@ def tracker_loop():
                 if px <= 0:
                     continue
 
+                entry = float(t["entry"])
                 stop = float(t["stop"])
                 tp1 = float(t["tp1"])
                 tp2 = float(t["tp2"])
                 direction = t["direction"]
 
-                # Stop
+                # Track MFE / MAE
+                if direction == "LONG":
+                    favorable = (px - entry) / entry
+                    adverse = (entry - px) / entry
+                else:
+                    favorable = (entry - px) / entry
+                    adverse = (px - entry) / entry
+
+                with open_trades_lock:
+                    if k in open_trades:
+                        open_trades[k]["analytics"]["max_favorable"] = max(
+                            float(open_trades[k]["analytics"].get("max_favorable", 0.0)), favorable
+                        )
+                        open_trades[k]["analytics"]["max_adverse"] = max(
+                            float(open_trades[k]["analytics"].get("max_adverse", 0.0)), adverse
+                        )
+
+                # Stop hit
                 if direction == "LONG" and px <= stop:
-                    send_telegram(f"❌ SL HIT — {t['symbol']} (LONG) ({t['ex_name'].upper()})")
+                    add_trade_event(t, "FULLY_CLOSED", "Trade stopped.")
+                    send_trade_update(
+                        t,
+                        [
+                            "Remaining position closed at stop.",
+                            "Trade finished green after TP1 partial." if t.get("tp1_partial_taken") else "Trade closed at loss.",
+                        ],
+                        title="Trade Closed"
+                    )
                     apply_stop_penalty(t["ex_name"], t["symbol"], "LONG")
                     outcome = "GREEN" if t.get("tp1_partial_taken") else "LOSS"
                     _record_closed(t, outcome, px)
@@ -1252,7 +1536,15 @@ def tracker_loop():
                     continue
 
                 if direction == "SHORT" and px >= stop:
-                    send_telegram(f"❌ SL HIT — {t['symbol']} (SHORT) ({t['ex_name'].upper()})")
+                    add_trade_event(t, "FULLY_CLOSED", "Trade stopped.")
+                    send_trade_update(
+                        t,
+                        [
+                            "Remaining position closed at stop.",
+                            "Trade finished green after TP1 partial." if t.get("tp1_partial_taken") else "Trade closed at loss.",
+                        ],
+                        title="Trade Closed"
+                    )
                     apply_stop_penalty(t["ex_name"], t["symbol"], "SHORT")
                     outcome = "GREEN" if t.get("tp1_partial_taken") else "LOSS"
                     _record_closed(t, outcome, px)
@@ -1260,39 +1552,86 @@ def tracker_loop():
                         open_trades.pop(k, None)
                     continue
 
-                # TP1 partial
+                # TP1
                 if not t.get("tp1_hit", False):
                     if direction == "LONG" and px >= tp1:
-                        send_telegram(f"✅ TP1 HIT — {t['symbol']} (LONG) ({t['ex_name'].upper()})")
+                        add_trade_event(t, "PARTIAL_TAKEN", "Took partial at TP1.")
                         with open_trades_lock:
                             if k in open_trades:
                                 open_trades[k]["tp1_hit"] = True
                                 open_trades[k]["tp1_partial_taken"] = True
+                                open_trades[k]["analytics"]["tp1_hit"] = True
+                                open_trades[k]["analytics"]["time_to_tp1_sec"] = utc_ts() - int(open_trades[k]["created_ts"])
+
+                                if LONG_MOVE_SL_TO_BE_AFTER_TP1:
+                                    be = entry * (1.0 + LONG_BE_BUFFER_PCT)
+                                    open_trades[k]["stop"] = max(float(open_trades[k]["stop"]), be)
+
+                        lines = [
+                            "Entry filled.",
+                            f"Took {int(TP1_SIZE_PCT*100)}% at TP1.",
+                        ]
+                        if LONG_MOVE_SL_TO_BE_AFTER_TP1:
+                            add_trade_event(t, "STOP_MOVED_BE", "Stop moved to breakeven.")
+                            lines.append("Stop moved to breakeven.")
+                        lines.append("Remaining position open.")
+                        send_trade_update(t, lines, title="Update")
                         continue
 
                     if direction == "SHORT" and px <= tp1:
-                        send_telegram(f"✅ TP1 HIT — {t['symbol']} (SHORT) ({t['ex_name'].upper()})")
+                        add_trade_event(t, "PARTIAL_TAKEN", "Took partial at TP1.")
                         with open_trades_lock:
                             if k in open_trades:
                                 open_trades[k]["tp1_hit"] = True
                                 open_trades[k]["tp1_partial_taken"] = True
+                                open_trades[k]["analytics"]["tp1_hit"] = True
+                                open_trades[k]["analytics"]["time_to_tp1_sec"] = utc_ts() - int(open_trades[k]["created_ts"])
 
                                 if SHORT_MOVE_SL_TO_BE_AFTER_TP1:
-                                    entry = float(open_trades[k]["entry"])
                                     be = entry * (1.0 + SHORT_BE_BUFFER_PCT)
                                     open_trades[k]["stop"] = min(float(open_trades[k]["stop"]), be)
+
+                        lines = [
+                            "Entry filled.",
+                            f"Took {int(TP1_SIZE_PCT*100)}% at TP1.",
+                        ]
+                        if SHORT_MOVE_SL_TO_BE_AFTER_TP1:
+                            add_trade_event(t, "STOP_MOVED_BE", "Stop moved to breakeven.")
+                            lines.append("Stop moved to breakeven.")
+                        lines.append("Remaining position open.")
+                        send_trade_update(t, lines, title="Update")
                         continue
 
-                # TP2 close
+                # TP2
                 if direction == "LONG" and px >= tp2:
-                    send_telegram(f"🏁 TP2 HIT — {t['symbol']} (LONG) ({t['ex_name'].upper()})")
+                    add_trade_event(t, "FULLY_CLOSED", "Trade fully closed at TP2.")
+                    t["analytics"]["tp2_hit"] = True
+                    t["analytics"]["time_to_tp2_sec"] = utc_ts() - int(t["created_ts"])
+                    send_trade_update(
+                        t,
+                        [
+                            "TP2 reached.",
+                            "Position fully closed.",
+                        ],
+                        title="Trade Closed"
+                    )
                     _record_closed(t, "WIN", px)
                     with open_trades_lock:
                         open_trades.pop(k, None)
                     continue
 
                 if direction == "SHORT" and px <= tp2:
-                    send_telegram(f"🏁 TP2 HIT — {t['symbol']} (SHORT) ({t['ex_name'].upper()})")
+                    add_trade_event(t, "FULLY_CLOSED", "Trade fully closed at TP2.")
+                    t["analytics"]["tp2_hit"] = True
+                    t["analytics"]["time_to_tp2_sec"] = utc_ts() - int(t["created_ts"])
+                    send_trade_update(
+                        t,
+                        [
+                            "TP2 reached.",
+                            "Position fully closed.",
+                        ],
+                        title="Trade Closed"
+                    )
                     _record_closed(t, "WIN", px)
                     with open_trades_lock:
                         open_trades.pop(k, None)
@@ -1302,12 +1641,12 @@ def tracker_loop():
                 log.error(f"Tracker error {k}: {e}")
 
 # ======================================================
-# MAIN SCANNER LOOP (LONG + SHORT)
+# MAIN SCANNER LOOP
 # ======================================================
 
 def _get_state_bucket(ex_name: str, symbol: str) -> Dict[str, Any]:
     skey = f"{ex_name}|{symbol}"
-    now = int(time.time())
+    now = utc_ts()
     if skey not in symbol_state:
         symbol_state[skey] = {"LONG": {}, "SHORT": {}, "_last_seen_ts": now}
     else:
@@ -1315,13 +1654,16 @@ def _get_state_bucket(ex_name: str, symbol: str) -> Dict[str, Any]:
     return symbol_state[skey]
 
 def _reset_side(st_side: Dict[str, Any]):
+    last_traded_ts = st_side.get("last_traded_div_swing2_ts")
     st_side.clear()
+    if last_traded_ts is not None:
+        st_side["last_traded_div_swing2_ts"] = last_traded_ts
 
 _last_cleanup_ts = 0
 
 def cleanup_symbol_state():
     global _last_cleanup_ts
-    now = int(time.time())
+    now = utc_ts()
     if (now - _last_cleanup_ts) < STATE_CLEANUP_EVERY_SEC:
         return
     _last_cleanup_ts = now
@@ -1369,14 +1711,13 @@ def scanner_loop():
 
                     if not low_vol_ok(df_15m):
                         continue
-
                     if not chop_ok(df_15m):
                         continue
 
                     st_bucket = _get_state_bucket(ex_name, symbol)
 
                     # -------------------------
-                    # LONG SIDE
+                    # LONGS
                     # -------------------------
                     if TRADE_MODE in ("both", "long_only"):
                         stL = st_bucket["LONG"]
@@ -1395,7 +1736,6 @@ def scanner_loop():
                                     stL["zone"] = new_zone
                                 continue
 
-                            # Tap
                             if not zoneL.get("tapped", False):
                                 if detect_zone_tap_long(df_15m, zoneL):
                                     zoneL["tapped"] = True
@@ -1409,13 +1749,11 @@ def scanner_loop():
                                 zoneL["tap_low"] = min(float(zoneL.get("tap_low", df_15m["low"].iloc[-1])), float(df_15m["low"].iloc[-1]))
                                 stL["zone"] = zoneL
 
-                            # Reaction
                             zoneL = update_reaction_long(df_15m, zoneL)
                             stL["zone"] = zoneL
                             if not zoneL.get("reacted", False):
                                 continue
 
-                            # Pump
                             pump = stL.get("pump")
                             if not pump:
                                 pump = detect_pump_long(df_15m)
@@ -1428,8 +1766,6 @@ def scanner_loop():
                                     continue
 
                             pump_high = float(stL["pump_high"])
-
-                            # Timeout
                             elapsed = (len(df_15m) - 1) - int(stL.get("phase_started_idx", len(df_15m) - 1))
                             if elapsed > RETEST_TIMEOUT_CANDLES:
                                 _reset_side(stL)
@@ -1459,11 +1795,12 @@ def scanner_loop():
                                     if allow_signal(ex_name, symbol, "LONG") and allow_coin(symbol):
                                         trade = build_trade_long(ex_name, symbol, entry, zoneL, df_15m, stL["pump"], df_1h)
                                         if trade:
+                                            trade = enrich_trade_analytics(trade, df_15m, df_1h, "LONG_BREAKOUT_RETEST")
                                             send_signal(trade)
                                             _reset_side(stL)
 
                     # -------------------------
-                    # SHORT SIDE (HI WIN RATE)
+                    # SHORTS
                     # -------------------------
                     if TRADE_MODE in ("both", "short_only") and ENABLE_SHORT_DIVERGENCE:
                         stS = st_bucket["SHORT"]
@@ -1516,6 +1853,8 @@ def scanner_loop():
                             if allow_signal(ex_name, symbol, "SHORT") and allow_coin(symbol):
                                 trade = build_trade_short_div(ex_name, symbol, entry, div, df_15m, df_1h)
                                 if trade:
+                                    trade = enrich_trade_analytics(trade, df_15m, df_1h, "SHORT_DIV_MSS_RETEST")
+                                    trade = enrich_short_support_feature(trade, df_1h)
                                     send_signal(trade)
                                     stS["last_traded_div_swing2_ts"] = swing2_ts
                                     _reset_side(stS)
@@ -1536,6 +1875,8 @@ def scanner_loop():
                             if allow_signal(ex_name, symbol, "SHORT") and allow_coin(symbol):
                                 trade = build_trade_short_div(ex_name, symbol, entry, div, df_15m, df_1h)
                                 if trade:
+                                    trade = enrich_trade_analytics(trade, df_15m, df_1h, "SHORT_DIV_MSS_RETEST")
+                                    trade = enrich_short_support_feature(trade, df_1h)
                                     send_signal(trade)
                                     stS["last_traded_div_swing2_ts"] = swing2_ts
                                     _reset_side(stS)
@@ -1553,7 +1894,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "CRT 15m STRATEGY BOT RUNNING (INFO ONLY) — OPTION B BALANCED (TP1-FIRST LONG TUNING APPLIED)"
+    return "CRT 15m STRATEGY BOT RUNNING — lifecycle + analytics build"
 
 if __name__ == "__main__":
     threading.Thread(target=scanner_loop, daemon=True).start()
