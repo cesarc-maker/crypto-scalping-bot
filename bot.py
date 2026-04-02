@@ -4,8 +4,11 @@
 # 15m = structure confirmation
 # 5m = execution
 #
-# INFO ONLY / PAPER TRADE STYLE
-# No real order execution included.
+# PAPER-TRADE / INFO-ONLY SIGNAL BOT
+# - No real orders
+# - One position at a time
+# - Telegram alerts
+# - Multi chat ID support via CHAT_IDS
 # ======================================================
 
 import os
@@ -37,43 +40,65 @@ log = logging.getLogger("MTF_REVERSAL_BOT")
 
 CT = ZoneInfo("America/Chicago")
 
+
 def ct_time_str() -> str:
     return datetime.now(timezone.utc).astimezone(CT).strftime("%H:%M CT")
+
 
 def utc_ts() -> int:
     return int(time.time())
 
+
 # ======================================================
-# CONFIG
+# TELEGRAM / ENV CONFIG
 # ======================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-CHAT_ID1 = os.getenv("CHAT_ID", "").strip()
-CHAT_ID2 = os.getenv("CHAT_ID2", "").strip()
-RAW_CHAT_IDS = os.getenv("CHAT_IDS", "")
-
-CHAT_IDS = set()
-if CHAT_ID1:
-    CHAT_IDS.add(CHAT_ID1)
-if CHAT_ID2:
-    CHAT_IDS.add(CHAT_ID2)
-if RAW_CHAT_IDS:
-    for cid in RAW_CHAT_IDS.split(","):
-        cid = cid.strip()
-        if cid:
-            CHAT_IDS.add(cid)
-CHAT_IDS = list(CHAT_IDS)
-
 PORT = int(os.getenv("PORT", 10000))
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 20))
-TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 10))
 
-EXCHANGE_NAME = os.getenv("EXCHANGE_NAME", "okx").strip()
+
+def parse_chat_ids() -> List[str]:
+    ids: List[str] = []
+    seen = set()
+
+    # legacy support
+    legacy_values = [
+        os.getenv("CHAT_ID", "").strip(),
+        os.getenv("CHAT_ID2", "").strip(),
+    ]
+
+    for value in legacy_values:
+        if value and value not in seen:
+            ids.append(value)
+            seen.add(value)
+
+    # preferred multi-id format
+    raw = os.getenv("CHAT_IDS", "").strip()
+    if raw:
+        for cid in raw.split(","):
+            cid = cid.strip()
+            if cid and cid not in seen:
+                ids.append(cid)
+                seen.add(cid)
+
+    return ids
+
+
+CHAT_IDS = parse_chat_ids()
+
+# ======================================================
+# BOT CONFIG
+# ======================================================
+
+EXCHANGE_NAME = os.getenv("EXCHANGE_NAME", "okx").strip().lower()
 SYMBOL = os.getenv("SYMBOL", "BNB/USDT:USDT").strip()
 
 TRADE_MODE = os.getenv("TRADE_MODE", "both").strip().lower()
 if TRADE_MODE not in ("long_only", "short_only", "both"):
     TRADE_MODE = "both"
+
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 20))
+TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 10))
 
 TF_CTX = "1h"
 TF_CONFIRM = "15m"
@@ -94,7 +119,7 @@ EMA_SLOW = int(os.getenv("EMA_SLOW", 50))
 ATR_LEN = int(os.getenv("ATR_LEN", 14))
 VOL_MA_LEN = int(os.getenv("VOL_MA_LEN", 20))
 
-# Pivots / structure
+# Pivot / structure settings
 PIVOT_LEFT = int(os.getenv("PIVOT_LEFT", 2))
 PIVOT_RIGHT = int(os.getenv("PIVOT_RIGHT", 2))
 SWING_LOOKBACK = int(os.getenv("SWING_LOOKBACK", 80))
@@ -104,32 +129,33 @@ MIN_SWING_SEPARATION = int(os.getenv("MIN_SWING_SEPARATION", 5))
 DIV_MIN_PRICE_DELTA_PCT = float(os.getenv("DIV_MIN_PRICE_DELTA_PCT", 0.0015))
 DIV_MIN_RSI_DELTA = float(os.getenv("DIV_MIN_RSI_DELTA", 2.0))
 
-# 1H context options
+# 1H context controls
 ENABLE_1H_DIVERGENCE = os.getenv("ENABLE_1H_DIVERGENCE", "1") == "1"
 ENABLE_1H_HL_LH = os.getenv("ENABLE_1H_HL_LH", "1") == "1"
 
-# 15m structure
-STRUCTURE_SWING_WINDOW = int(os.getenv("STRUCTURE_SWING_WINDOW", 6))
-
-# 5m execution
+# 5m entry controls
 REQUIRE_EMA_ALIGNMENT_5M = os.getenv("REQUIRE_EMA_ALIGNMENT_5M", "0") == "1"
 VOLUME_MULT = float(os.getenv("VOLUME_MULT", 1.05))
 BULLISH_CLOSE_POS_MIN = float(os.getenv("BULLISH_CLOSE_POS_MIN", 0.65))
 BEARISH_CLOSE_POS_MAX = float(os.getenv("BEARISH_CLOSE_POS_MAX", 0.35))
 BOS_ATR_BUFFER_MULT = float(os.getenv("BOS_ATR_BUFFER_MULT", 0.05))
 
-# Risk
+# Risk settings
 STOP_METHOD = os.getenv("STOP_METHOD", "ATR").strip().upper()
+if STOP_METHOD not in ("ATR", "STRUCT"):
+    STOP_METHOD = "ATR"
+
 ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", 1.2))
 WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0005))
 MIN_RR = float(os.getenv("MIN_RR", 1.5))
 MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", 0.001))
 
-# Trade management
+# Position / cooldown
 ONE_POSITION_AT_A_TIME = os.getenv("ONE_POSITION_AT_A_TIME", "1") == "1"
 COOLDOWN_SEC = int(os.getenv("COOLDOWN_SEC", 1800))
 WINDOW = int(os.getenv("WINDOW", 1200))
 
+# UI text
 RISK_PCT_TEXT = os.getenv("RISK_PCT_TEXT", "1%")
 LEVERAGE_TEXT = os.getenv("LEVERAGE_TEXT", "3x isolated")
 POSITION_SIZE_TEXT = os.getenv("POSITION_SIZE_TEXT", "Risk only 1% of account equity")
@@ -147,12 +173,15 @@ open_trades_lock = threading.Lock()
 closed_trades: List[Dict[str, Any]] = []
 stats_lock = threading.Lock()
 
+last_processed_exec_candle_ts: Dict[str, int] = {}
+
 # ======================================================
-# HELPERS
+# GENERIC HELPERS
 # ======================================================
 
 def norm_symbol(symbol: str) -> str:
     return symbol.split(":")[0].replace("/", "").strip()
+
 
 def make_trade_id(ex_name: str, symbol: str, direction: str) -> str:
     ts = datetime.now(timezone.utc).strftime("%m%d-%H%M")
@@ -160,6 +189,7 @@ def make_trade_id(ex_name: str, symbol: str, direction: str) -> str:
     side = "L" if direction == "LONG" else "S"
     ex_tag = ex_name.upper()
     return f"{base}-{side}-{ex_tag}-{ts}"
+
 
 def fmt_price(px: float) -> str:
     if px >= 1000:
@@ -170,15 +200,18 @@ def fmt_price(px: float) -> str:
         return f"{px:.6f}"
     return f"{px:.8f}"
 
+
 def has_open_position() -> bool:
     with open_trades_lock:
         return len(open_trades) > 0
+
 
 def cooldown_ok() -> bool:
     global recent_position_close_ts
     if recent_position_close_ts is None:
         return True
     return (time.time() - recent_position_close_ts) >= COOLDOWN_SEC
+
 
 def allow_signal(key: str) -> bool:
     now = time.time()
@@ -188,16 +221,19 @@ def allow_signal(key: str) -> bool:
         return True
     return False
 
+
 # ======================================================
 # TELEGRAM
 # ======================================================
 
 TELEGRAM_API = "https://api.telegram.org"
 
+
 def send_telegram(text: str):
     if not BOT_TOKEN:
         log.error("BOT_TOKEN missing")
         return
+
     if not CHAT_IDS:
         log.warning("No chat IDs configured")
         return
@@ -206,14 +242,15 @@ def send_telegram(text: str):
     chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)]
 
     for cid in CHAT_IDS:
-        for ch in chunks:
+        for chunk in chunks:
             try:
                 url = f"{TELEGRAM_API}/bot{BOT_TOKEN}/sendMessage"
-                r = requests.post(url, json={"chat_id": cid, "text": ch}, timeout=10)
+                r = requests.post(url, json={"chat_id": cid, "text": chunk}, timeout=10)
                 if r.status_code >= 400:
                     log.error(f"Telegram HTTP {r.status_code}: {r.text[:200]}")
             except Exception as e:
                 log.error(f"Telegram error for {cid}: {e}")
+
 
 def send_startup():
     msg = (
@@ -225,14 +262,18 @@ def send_startup():
         f"Exchange: {EXCHANGE_NAME}\n"
         f"Trade mode: {TRADE_MODE}\n"
         f"Cooldown: {COOLDOWN_SEC // 60} min\n"
-        f"Min RR: {MIN_RR:.2f}\n\n"
+        f"Min RR: {MIN_RR:.2f}\n"
+        f"Chats: {len(CHAT_IDS)}\n\n"
         f"🕐 Started: {ct_time_str()}\n\n"
         "⚠️ Info only. Not financial advice."
     )
     send_telegram(msg)
+    log.info(f"Active Telegram chat IDs: {CHAT_IDS}")
+
 
 def send_status(text: str):
     send_telegram(f"ℹ️ {SYMBOL}: {text}")
+
 
 # ======================================================
 # TTL CACHE
@@ -243,10 +284,10 @@ class TTLCache:
         self._store: Dict[Any, Tuple[Any, float]] = {}
 
     def get(self, key):
-        v = self._store.get(key)
-        if not v:
+        item = self._store.get(key)
+        if not item:
             return None
-        value, exp = v
+        value, exp = item
         if time.time() > exp:
             self._store.pop(key, None)
             return None
@@ -255,13 +296,14 @@ class TTLCache:
     def set(self, key, value, ttl_sec: int):
         self._store[key] = (value, time.time() + ttl_sec)
 
+
 ohlcv_cache = TTLCache()
 
 # ======================================================
 # INDICATORS
 # ======================================================
 
-def rsi(series: pd.Series, length: int = 14) -> pd.Series:
+def calc_rsi(series: pd.Series, length: int = 14) -> pd.Series:
     delta = series.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = (-delta).where(delta < 0, 0.0)
@@ -273,19 +315,21 @@ def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     out = 100 - (100 / (1 + rs))
     return out.fillna(50)
 
+
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     prev_close = df["close"].shift(1)
     tr1 = df["high"] - df["low"]
     tr2 = (df["high"] - prev_close).abs()
     tr3 = (df["low"] - prev_close).abs()
+
     df["tr"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df["atr"] = df["tr"].rolling(ATR_LEN).mean()
-
-    df["rsi"] = rsi(df["close"], RSI_LEN)
+    df["rsi"] = calc_rsi(df["close"], RSI_LEN)
     df["ema_fast"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
     df["ema_slow"] = df["close"].ewm(span=EMA_SLOW, adjust=False).mean()
     df["vol_ma"] = df["volume"].rolling(VOL_MA_LEN).mean()
     return df
+
 
 def candle_close_position(row: pd.Series) -> float:
     rng = float(row["high"] - row["low"])
@@ -293,41 +337,32 @@ def candle_close_position(row: pd.Series) -> float:
         return 0.5
     return float((row["close"] - row["low"]) / rng)
 
+
 # ======================================================
-# PIVOTS / SWINGS
+# PIVOT / SWING HELPERS
 # ======================================================
 
 def pivot_highs(df: pd.DataFrame, left: int, right: int) -> List[int]:
-    out = []
+    idxs = []
     for i in range(left, len(df) - right):
         h = float(df["high"].iloc[i])
         prev_ok = all(h > float(df["high"].iloc[i - j]) for j in range(1, left + 1))
         next_ok = all(h >= float(df["high"].iloc[i + j]) for j in range(1, right + 1))
         if prev_ok and next_ok:
-            out.append(i)
-    return out
+            idxs.append(i)
+    return idxs
+
 
 def pivot_lows(df: pd.DataFrame, left: int, right: int) -> List[int]:
-    out = []
+    idxs = []
     for i in range(left, len(df) - right):
-        l = float(df["low"].iloc[i])
-        prev_ok = all(l < float(df["low"].iloc[i - j]) for j in range(1, left + 1))
-        next_ok = all(l <= float(df["low"].iloc[i + j]) for j in range(1, right + 1))
+        lo = float(df["low"].iloc[i])
+        prev_ok = all(lo < float(df["low"].iloc[i - j]) for j in range(1, left + 1))
+        next_ok = all(lo <= float(df["low"].iloc[i + j]) for j in range(1, right + 1))
         if prev_ok and next_ok:
-            out.append(i)
-    return out
+            idxs.append(i)
+    return idxs
 
-def last_two_pivot_highs(df: pd.DataFrame) -> Optional[Tuple[int, int]]:
-    highs = pivot_highs(df.tail(SWING_LOOKBACK).reset_index(drop=True), PIVOT_LEFT, PIVOT_RIGHT)
-    if len(highs) < 2:
-        return None
-    return highs[-2], highs[-1]
-
-def last_two_pivot_lows(df: pd.DataFrame) -> Optional[Tuple[int, int]]:
-    lows = pivot_lows(df.tail(SWING_LOOKBACK).reset_index(drop=True), PIVOT_LEFT, PIVOT_RIGHT)
-    if len(lows) < 2:
-        return None
-    return lows[-2], lows[-1]
 
 def get_recent_structure_points(df: pd.DataFrame) -> Dict[str, Any]:
     work = df.tail(SWING_LOOKBACK).reset_index(drop=True)
@@ -335,21 +370,17 @@ def get_recent_structure_points(df: pd.DataFrame) -> Dict[str, Any]:
     highs = pivot_highs(work, PIVOT_LEFT, PIVOT_RIGHT)
     lows = pivot_lows(work, PIVOT_LEFT, PIVOT_RIGHT)
 
-    last_high = float(work["high"].iloc[highs[-1]]) if highs else None
-    prev_high = float(work["high"].iloc[highs[-2]]) if len(highs) >= 2 else None
-    last_low = float(work["low"].iloc[lows[-1]]) if lows else None
-    prev_low = float(work["low"].iloc[lows[-2]]) if len(lows) >= 2 else None
-
     return {
-        "last_high": last_high,
-        "prev_high": prev_high,
-        "last_low": last_low,
-        "prev_low": prev_low,
-        "last_high_idx": highs[-1] if highs else None,
-        "prev_high_idx": highs[-2] if len(highs) >= 2 else None,
-        "last_low_idx": lows[-1] if lows else None,
-        "prev_low_idx": lows[-2] if len(lows) >= 2 else None,
+        "last_high": float(work["high"].iloc[highs[-1]]) if len(highs) >= 1 else None,
+        "prev_high": float(work["high"].iloc[highs[-2]]) if len(highs) >= 2 else None,
+        "last_low": float(work["low"].iloc[lows[-1]]) if len(lows) >= 1 else None,
+        "prev_low": float(work["low"].iloc[lows[-2]]) if len(lows) >= 2 else None,
+        "last_high_idx": int(highs[-1]) if len(highs) >= 1 else None,
+        "prev_high_idx": int(highs[-2]) if len(highs) >= 2 else None,
+        "last_low_idx": int(lows[-1]) if len(lows) >= 1 else None,
+        "prev_low_idx": int(lows[-2]) if len(lows) >= 2 else None,
     }
+
 
 # ======================================================
 # DIVERGENCE
@@ -358,6 +389,7 @@ def get_recent_structure_points(df: pd.DataFrame) -> Dict[str, Any]:
 def detect_bullish_divergence(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     work = df.tail(SWING_LOOKBACK).reset_index(drop=True)
     lows = pivot_lows(work, PIVOT_LEFT, PIVOT_RIGHT)
+
     if len(lows) < 2:
         return None
 
@@ -383,17 +415,19 @@ def detect_bullish_divergence(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
 
     return {
         "type": "bullish",
-        "swing1_idx": i1,
-        "swing2_idx": i2,
-        "price1": p1,
-        "price2": p2,
-        "rsi1": r1,
-        "rsi2": r2,
+        "swing1_idx": int(i1),
+        "swing2_idx": int(i2),
+        "price1": float(p1),
+        "price2": float(p2),
+        "rsi1": float(r1),
+        "rsi2": float(r2),
     }
+
 
 def detect_bearish_divergence(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     work = df.tail(SWING_LOOKBACK).reset_index(drop=True)
     highs = pivot_highs(work, PIVOT_LEFT, PIVOT_RIGHT)
+
     if len(highs) < 2:
         return None
 
@@ -419,13 +453,14 @@ def detect_bearish_divergence(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
 
     return {
         "type": "bearish",
-        "swing1_idx": i1,
-        "swing2_idx": i2,
-        "price1": p1,
-        "price2": p2,
-        "rsi1": r1,
-        "rsi2": r2,
+        "swing1_idx": int(i1),
+        "swing2_idx": int(i2),
+        "price1": float(p1),
+        "price2": float(p2),
+        "rsi1": float(r1),
+        "rsi2": float(r2),
     }
+
 
 # ======================================================
 # 1H CONTEXT
@@ -437,27 +472,30 @@ def has_confirmed_higher_low(df: pd.DataFrame) -> bool:
         return False
     return float(pts["last_low"]) > float(pts["prev_low"])
 
+
 def has_confirmed_lower_high(df: pd.DataFrame) -> bool:
     pts = get_recent_structure_points(df)
     if pts["prev_high"] is None or pts["last_high"] is None:
         return False
     return float(pts["last_high"]) < float(pts["prev_high"])
 
+
 def get_1h_context(df_1h: pd.DataFrame) -> str:
     bull_div = detect_bullish_divergence(df_1h) if ENABLE_1H_DIVERGENCE else None
     bear_div = detect_bearish_divergence(df_1h) if ENABLE_1H_DIVERGENCE else None
 
-    has_hl = has_confirmed_higher_low(df_1h) if ENABLE_1H_HL_LH else False
-    has_lh = has_confirmed_lower_high(df_1h) if ENABLE_1H_HL_LH else False
+    bull_hl = has_confirmed_higher_low(df_1h) if ENABLE_1H_HL_LH else False
+    bear_lh = has_confirmed_lower_high(df_1h) if ENABLE_1H_HL_LH else False
 
-    bull = bool(bull_div) or has_hl
-    bear = bool(bear_div) or has_lh
+    bullish = bool(bull_div) or bool(bull_hl)
+    bearish = bool(bear_div) or bool(bear_lh)
 
-    if bull and not bear:
+    if bullish and not bearish:
         return "bullish"
-    if bear and not bull:
+    if bearish and not bullish:
         return "bearish"
     return "neutral"
+
 
 # ======================================================
 # 15m STRUCTURE
@@ -484,6 +522,7 @@ def get_15m_structure(df_15m: pd.DataFrame) -> str:
         return "bearish"
     return "neutral"
 
+
 # ======================================================
 # 5m EXECUTION
 # ======================================================
@@ -494,11 +533,13 @@ def volume_ok(df_5m: pd.DataFrame) -> bool:
         return False
     return float(last["volume"]) >= float(last["vol_ma"]) * VOLUME_MULT
 
+
 def bullish_candle_ok(df_5m: pd.DataFrame) -> bool:
     last = df_5m.iloc[-1]
     if float(last["close"]) <= float(last["open"]):
         return False
     return candle_close_position(last) >= BULLISH_CLOSE_POS_MIN
+
 
 def bearish_candle_ok(df_5m: pd.DataFrame) -> bool:
     last = df_5m.iloc[-1]
@@ -506,17 +547,24 @@ def bearish_candle_ok(df_5m: pd.DataFrame) -> bool:
         return False
     return candle_close_position(last) <= BEARISH_CLOSE_POS_MAX
 
+
 def ema_alignment_long_ok(df_5m: pd.DataFrame) -> bool:
     if not REQUIRE_EMA_ALIGNMENT_5M:
         return True
     last = df_5m.iloc[-1]
+    if pd.isna(last["ema_fast"]) or pd.isna(last["ema_slow"]):
+        return False
     return float(last["ema_fast"]) > float(last["ema_slow"])
+
 
 def ema_alignment_short_ok(df_5m: pd.DataFrame) -> bool:
     if not REQUIRE_EMA_ALIGNMENT_5M:
         return True
     last = df_5m.iloc[-1]
+    if pd.isna(last["ema_fast"]) or pd.isna(last["ema_slow"]):
+        return False
     return float(last["ema_fast"]) < float(last["ema_slow"])
+
 
 def latest_exec_pivot_high(df_5m: pd.DataFrame) -> Optional[float]:
     work = df_5m.tail(SWING_LOOKBACK).reset_index(drop=True)
@@ -525,12 +573,14 @@ def latest_exec_pivot_high(df_5m: pd.DataFrame) -> Optional[float]:
         return None
     return float(work["high"].iloc[highs[-1]])
 
+
 def latest_exec_pivot_low(df_5m: pd.DataFrame) -> Optional[float]:
     work = df_5m.tail(SWING_LOOKBACK).reset_index(drop=True)
     lows = pivot_lows(work, PIVOT_LEFT, PIVOT_RIGHT)
     if not lows:
         return None
     return float(work["low"].iloc[lows[-1]])
+
 
 def previous_15m_resistance(df_15m: pd.DataFrame) -> Optional[float]:
     pts = get_recent_structure_points(df_15m)
@@ -540,6 +590,7 @@ def previous_15m_resistance(df_15m: pd.DataFrame) -> Optional[float]:
         return float(pts["prev_high"])
     return None
 
+
 def previous_15m_support(df_15m: pd.DataFrame) -> Optional[float]:
     pts = get_recent_structure_points(df_15m)
     if pts["last_low"] is not None:
@@ -547,6 +598,7 @@ def previous_15m_support(df_15m: pd.DataFrame) -> Optional[float]:
     if pts["prev_low"] is not None:
         return float(pts["prev_low"])
     return None
+
 
 def get_5m_entry_signal(df_5m: pd.DataFrame, df_15m: pd.DataFrame, direction: str) -> Optional[Dict[str, Any]]:
     last = df_5m.iloc[-1]
@@ -559,9 +611,9 @@ def get_5m_entry_signal(df_5m: pd.DataFrame, df_15m: pd.DataFrame, direction: st
     if direction == "LONG":
         div = detect_bullish_divergence(df_5m)
         bos_level = latest_exec_pivot_high(df_5m)
-        target = previous_15m_resistance(df_15m)
+        tp_level = previous_15m_resistance(df_15m)
 
-        if not div or bos_level is None or target is None:
+        if not div or bos_level is None or tp_level is None:
             return None
         if entry <= bos_level + (BOS_ATR_BUFFER_MULT * atr):
             return None
@@ -572,22 +624,21 @@ def get_5m_entry_signal(df_5m: pd.DataFrame, df_15m: pd.DataFrame, direction: st
         if not ema_alignment_long_ok(df_5m):
             return None
 
-        swing_low = float(div["price2"])
         return {
             "direction": "LONG",
             "entry": entry,
-            "bos_level": bos_level,
-            "structure_stop_ref": swing_low,
-            "tp_level": float(target),
+            "bos_level": float(bos_level),
+            "structure_stop_ref": float(div["price2"]),
+            "tp_level": float(tp_level),
             "reason": "5m bullish divergence + BOS + bullish candle + volume",
         }
 
     if direction == "SHORT":
         div = detect_bearish_divergence(df_5m)
         bos_level = latest_exec_pivot_low(df_5m)
-        target = previous_15m_support(df_15m)
+        tp_level = previous_15m_support(df_15m)
 
-        if not div or bos_level is None or target is None:
+        if not div or bos_level is None or tp_level is None:
             return None
         if entry >= bos_level - (BOS_ATR_BUFFER_MULT * atr):
             return None
@@ -598,34 +649,33 @@ def get_5m_entry_signal(df_5m: pd.DataFrame, df_15m: pd.DataFrame, direction: st
         if not ema_alignment_short_ok(df_5m):
             return None
 
-        swing_high = float(div["price2"])
         return {
             "direction": "SHORT",
             "entry": entry,
-            "bos_level": bos_level,
-            "structure_stop_ref": swing_high,
-            "tp_level": float(target),
+            "bos_level": float(bos_level),
+            "structure_stop_ref": float(div["price2"]),
+            "tp_level": float(tp_level),
             "reason": "5m bearish divergence + BOS + bearish candle + volume",
         }
 
     return None
 
+
 # ======================================================
-# TRADE BUILD
+# QUALITY / RISK LABELING
 # ======================================================
 
 def calc_quality_score(df_5m: pd.DataFrame, df_15m: pd.DataFrame, direction: str) -> float:
     last = df_5m.iloc[-1]
-
     score = 0.0
 
     if not pd.isna(last["vol_ma"]) and float(last["vol_ma"]) > 0:
-        vr = float(last["volume"]) / float(last["vol_ma"])
-        score += 3.0 if vr >= 1.5 else 2.0 if vr >= 1.2 else 1.0 if vr >= 1.0 else 0.5
+        vol_ratio = float(last["volume"]) / float(last["vol_ma"])
+        score += 3.0 if vol_ratio >= 1.5 else 2.0 if vol_ratio >= 1.2 else 1.0 if vol_ratio >= 1.0 else 0.5
     else:
         score += 0.5
 
-    atr_pct = (float(last["atr"]) / float(last["close"])) * 100 if float(last["close"]) > 0 else 0.0
+    atr_pct = (float(last["atr"]) / float(last["close"]) * 100.0) if float(last["close"]) > 0 else 0.0
     score += 2.5 if atr_pct >= 0.8 else 2.0 if atr_pct >= 0.5 else 1.0
 
     struct = get_15m_structure(df_15m)
@@ -639,6 +689,7 @@ def calc_quality_score(df_5m: pd.DataFrame, df_15m: pd.DataFrame, direction: str
     score += 2.0
     return round(min(score, 10.0), 2)
 
+
 def risk_label(score: float) -> Tuple[str, str]:
     if score >= 8.0:
         return ("LOW", "A+")
@@ -647,6 +698,11 @@ def risk_label(score: float) -> Tuple[str, str]:
     if score >= 5.0:
         return ("MED", "B")
     return ("HIGH", "C")
+
+
+# ======================================================
+# TRADE BUILDING
+# ======================================================
 
 def build_trade(ex_name: str, symbol: str, signal: Dict[str, Any], df_5m: pd.DataFrame, df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
     last = df_5m.iloc[-1]
@@ -663,7 +719,7 @@ def build_trade(ex_name: str, symbol: str, signal: Dict[str, Any], df_5m: pd.Dat
         atr_stop = entry - (ATR_STOP_MULT * atr)
         stop = min(struct_stop, atr_stop) if STOP_METHOD == "ATR" else struct_stop
 
-        if stop >= entry or stop <= 0:
+        if stop <= 0 or stop >= entry:
             return None
 
         risk_dist = entry - stop
@@ -691,8 +747,8 @@ def build_trade(ex_name: str, symbol: str, signal: Dict[str, Any], df_5m: pd.Dat
     if rr < MIN_RR:
         return None
 
-    score = calc_quality_score(df_5m, df_15m, direction)
-    risk_txt, grade = risk_label(score)
+    q_score = calc_quality_score(df_5m, df_15m, direction)
+    risk_text, grade = risk_label(q_score)
     now = utc_ts()
 
     return {
@@ -700,19 +756,19 @@ def build_trade(ex_name: str, symbol: str, signal: Dict[str, Any], df_5m: pd.Dat
         "ex_name": ex_name,
         "symbol": symbol,
         "direction": direction,
-        "entry": entry,
-        "entry_range_low": entry * 0.999,
-        "entry_range_high": entry * 1.001,
+        "entry": float(entry),
+        "entry_range_low": float(entry * 0.999),
+        "entry_range_high": float(entry * 1.001),
         "stop": float(stop),
         "tp1": float(tp),
-        "tp2": float(tp),   # kept for compatibility with tracker/message structure
+        "tp2": float(tp),  # compatibility with tracker schema
         "tp3": None,
         "tp1_hit": False,
         "tp1_partial_taken": False,
         "tp2_rr": float(rr),
         "rr": float(rr),
-        "quality_score": float(score),
-        "risk_text": risk_txt,
+        "quality_score": float(q_score),
+        "risk_text": risk_text,
         "risk_grade": grade,
         "status": "ACTIVE",
         "start_ts": now,
@@ -733,8 +789,9 @@ def build_trade(ex_name: str, symbol: str, signal: Dict[str, Any], df_5m: pd.Dat
         }
     }
 
+
 # ======================================================
-# EXCHANGE
+# EXCHANGE SETUP
 # ======================================================
 
 def get_ex(name: str):
@@ -750,8 +807,10 @@ def get_ex(name: str):
         log.error(f"Exchange load error ({name}): {e}")
         return None
 
+
 EX = None
 MARKETS_READY = False
+
 
 def get_ex_cached():
     global EX
@@ -759,6 +818,7 @@ def get_ex_cached():
         return EX
     EX = get_ex(EXCHANGE_NAME)
     return EX
+
 
 def ensure_markets_loaded(ex) -> bool:
     global MARKETS_READY
@@ -772,8 +832,9 @@ def ensure_markets_loaded(ex) -> bool:
         log.error(f"load_markets failed: {e}")
         return False
 
+
 # ======================================================
-# DATA FETCH
+# DATA FETCHING
 # ======================================================
 
 def get_df_cached(ex_name: str, ex, symbol: str, tf: str, limit: int, ttl_sec: int) -> Optional[pd.DataFrame]:
@@ -792,8 +853,9 @@ def get_df_cached(ex_name: str, ex, symbol: str, tf: str, limit: int, ttl_sec: i
         log.error(f"Fetch error {symbol} {tf}: {e}")
         return None
 
+
 # ======================================================
-# MESSAGING
+# TRADE LIFECYCLE / MESSAGING
 # ======================================================
 
 def add_trade_event(trade: Dict[str, Any], event_type: str, message: str):
@@ -803,6 +865,7 @@ def add_trade_event(trade: Dict[str, Any], event_type: str, message: str):
         "type": event_type,
         "message": message,
     })
+
 
 def send_signal(trade: Dict[str, Any]):
     emoji = "📈" if trade["direction"] == "LONG" else "📉"
@@ -824,11 +887,15 @@ def send_signal(trade: Dict[str, Any]):
         f"🕐 {ct_time_str()} | {trade['ex_name'].upper()}\n\n"
         "⚠️ Info only. Not financial advice."
     )
+
     send_telegram(msg)
     add_trade_event(trade, "TRADE_TRIGGERED", "Trade triggered and plan published.")
 
     with open_trades_lock:
         open_trades[trade["trade_id"]] = trade
+
+    log.info(f"Trade opened: {trade['trade_id']}")
+
 
 def send_trade_update(trade: Dict[str, Any], lines: List[str], title: str = "Update"):
     msg = (
@@ -839,6 +906,7 @@ def send_trade_update(trade: Dict[str, Any], lines: List[str], title: str = "Upd
         + "⚠️ Info only. Not financial advice."
     )
     send_telegram(msg)
+
 
 # ======================================================
 # CLOSED TRADE RECORD
@@ -858,11 +926,12 @@ def record_closed(trade: Dict[str, Any], outcome: str, exit_price: float):
             "tp": float(trade["tp1"]),
             "exit_price": float(exit_price),
             "rr": float(trade.get("rr", 0.0)),
-            "quality_score": trade.get("quality_score"),
+            "quality_score": float(trade.get("quality_score", 0.0)),
             "outcome": outcome,
             "created_ts": trade.get("created_ts"),
             "closed_ts": utc_ts(),
         })
+
 
 # ======================================================
 # TRACKER LOOP
@@ -879,23 +948,24 @@ def tracker_loop():
         for k in keys:
             try:
                 with open_trades_lock:
-                    t = open_trades.get(k)
-                if not t:
+                    trade = open_trades.get(k)
+
+                if not trade:
                     continue
 
                 ex = get_ex_cached()
                 if not ex:
                     continue
 
-                ticker = ex.fetch_ticker(t["symbol"])
+                ticker = ex.fetch_ticker(trade["symbol"])
                 px = float(ticker.get("last") or ticker.get("close") or 0.0)
                 if px <= 0:
                     continue
 
-                entry = float(t["entry"])
-                stop = float(t["stop"])
-                tp = float(t["tp1"])
-                direction = t["direction"]
+                entry = float(trade["entry"])
+                stop = float(trade["stop"])
+                tp = float(trade["tp1"])
+                direction = trade["direction"]
 
                 if direction == "LONG":
                     favorable = (px - entry) / entry
@@ -907,48 +977,69 @@ def tracker_loop():
                 with open_trades_lock:
                     if k in open_trades:
                         open_trades[k]["analytics"]["max_favorable"] = max(
-                            float(open_trades[k]["analytics"].get("max_favorable", 0.0)), favorable
+                            float(open_trades[k]["analytics"].get("max_favorable", 0.0)),
+                            favorable
                         )
                         open_trades[k]["analytics"]["max_adverse"] = max(
-                            float(open_trades[k]["analytics"].get("max_adverse", 0.0)), adverse
+                            float(open_trades[k]["analytics"].get("max_adverse", 0.0)),
+                            adverse
                         )
 
-                # stop
+                # Stop hit
                 if direction == "LONG" and px <= stop:
-                    add_trade_event(t, "FULLY_CLOSED", "Trade stopped.")
-                    send_trade_update(t, ["Stop loss reached.", "Trade closed."], title="Trade Closed")
-                    record_closed(t, "LOSS", px)
+                    add_trade_event(trade, "FULLY_CLOSED", "Trade stopped.")
+                    send_trade_update(trade, ["Stop loss reached.", "Trade closed."], title="Trade Closed")
+                    record_closed(trade, "LOSS", px)
                     with open_trades_lock:
                         open_trades.pop(k, None)
                     continue
 
                 if direction == "SHORT" and px >= stop:
-                    add_trade_event(t, "FULLY_CLOSED", "Trade stopped.")
-                    send_trade_update(t, ["Stop loss reached.", "Trade closed."], title="Trade Closed")
-                    record_closed(t, "LOSS", px)
+                    add_trade_event(trade, "FULLY_CLOSED", "Trade stopped.")
+                    send_trade_update(trade, ["Stop loss reached.", "Trade closed."], title="Trade Closed")
+                    record_closed(trade, "LOSS", px)
                     with open_trades_lock:
                         open_trades.pop(k, None)
                     continue
 
-                # take profit
+                # Take profit
                 if direction == "LONG" and px >= tp:
-                    add_trade_event(t, "FULLY_CLOSED", "Take profit reached.")
-                    send_trade_update(t, ["Take profit reached.", "Trade closed."], title="Trade Closed")
-                    record_closed(t, "WIN", px)
+                    add_trade_event(trade, "FULLY_CLOSED", "Take profit reached.")
+                    send_trade_update(trade, ["Take profit reached.", "Trade closed."], title="Trade Closed")
+                    record_closed(trade, "WIN", px)
                     with open_trades_lock:
                         open_trades.pop(k, None)
                     continue
 
                 if direction == "SHORT" and px <= tp:
-                    add_trade_event(t, "FULLY_CLOSED", "Take profit reached.")
-                    send_trade_update(t, ["Take profit reached.", "Trade closed."], title="Trade Closed")
-                    record_closed(t, "WIN", px)
+                    add_trade_event(trade, "FULLY_CLOSED", "Take profit reached.")
+                    send_trade_update(trade, ["Take profit reached.", "Trade closed."], title="Trade Closed")
+                    record_closed(trade, "WIN", px)
                     with open_trades_lock:
                         open_trades.pop(k, None)
                     continue
 
             except Exception as e:
                 log.error(f"Tracker error {k}: {e}")
+
+
+# ======================================================
+# EXEC CANDLE DUPLICATE GUARD
+# ======================================================
+
+def is_new_exec_candle(df_5m: pd.DataFrame, key: str) -> bool:
+    if df_5m.empty:
+        return False
+
+    ts = int(df_5m["ts"].iloc[-1])
+    last_seen = last_processed_exec_candle_ts.get(key)
+
+    if last_seen is not None and ts <= last_seen:
+        return False
+
+    last_processed_exec_candle_ts[key] = ts
+    return True
+
 
 # ======================================================
 # SCANNER LOOP
@@ -964,6 +1055,7 @@ def scanner_loop():
             if not ex:
                 time.sleep(SCAN_INTERVAL)
                 continue
+
             if not ensure_markets_loaded(ex):
                 time.sleep(SCAN_INTERVAL)
                 continue
@@ -988,8 +1080,15 @@ def scanner_loop():
                 time.sleep(SCAN_INTERVAL)
                 continue
 
+            # only process once per new 5m candle
+            if not is_new_exec_candle(df_5m, f"{EXCHANGE_NAME}|{SYMBOL}"):
+                time.sleep(SCAN_INTERVAL)
+                continue
+
             ctx_1h = get_1h_context(df_1h)
             struct_15m = get_15m_structure(df_15m)
+
+            log.info(f"Context: 1H={ctx_1h}, 15m={struct_15m}")
 
             # LONG
             if TRADE_MODE in ("both", "long_only"):
@@ -1018,15 +1117,18 @@ def scanner_loop():
 
         time.sleep(SCAN_INTERVAL)
 
+
 # ======================================================
 # FLASK
 # ======================================================
 
 app = Flask(__name__)
 
+
 @app.route("/")
 def home():
     return "MTF reversal bot running"
+
 
 # ======================================================
 # MAIN
