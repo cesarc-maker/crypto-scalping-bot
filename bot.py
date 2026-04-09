@@ -101,9 +101,9 @@ if TRADE_MODE not in ("long_only", "short_only", "both"):
 
 # Universe
 PAIR_LIMIT = int(os.getenv("PAIR_LIMIT", 260))
-TOP_MOVER_COUNT = int(os.getenv("TOP_MOVER_COUNT", 35))
-MIN_QUOTE_VOL_USDT = float(os.getenv("MIN_QUOTE_VOL_USDT", 5_000_000))
-MAX_SPREAD_BPS = float(os.getenv("MAX_SPREAD_BPS", 25))
+TOP_MOVER_COUNT = int(os.getenv("TOP_MOVER_COUNT", 60))
+MIN_QUOTE_VOL_USDT = float(os.getenv("MIN_QUOTE_VOL_USDT", 2_500_000))
+MAX_SPREAD_BPS = float(os.getenv("MAX_SPREAD_BPS", 35))
 ALLOW_ONLY_ACTIVE = os.getenv("ALLOW_ONLY_ACTIVE", "1") == "1"
 USE_TOP_MOVERS_ONLY = os.getenv("USE_TOP_MOVERS_ONLY", "1") == "1"
 
@@ -124,14 +124,14 @@ USE_EMA_FILTER = os.getenv("USE_EMA_FILTER", "0") == "1"
 PIVOT_LEFT = int(os.getenv("PIVOT_LEFT", 2))
 PIVOT_RIGHT = int(os.getenv("PIVOT_RIGHT", 2))
 DIV_LOOKBACK = int(os.getenv("DIV_LOOKBACK", 60))
-DIV_MIN_SWING_SEPARATION = int(os.getenv("DIV_MIN_SWING_SEPARATION", 5))
-DIV_MIN_PRICE_DELTA_PCT = float(os.getenv("DIV_MIN_PRICE_DELTA_PCT", 0.0015))
-DIV_MIN_RSI_DELTA = float(os.getenv("DIV_MIN_RSI_DELTA", 2.0))
+DIV_MIN_SWING_SEPARATION = int(os.getenv("DIV_MIN_SWING_SEPARATION", 3))
+DIV_MIN_PRICE_DELTA_PCT = float(os.getenv("DIV_MIN_PRICE_DELTA_PCT", 0.0008))
+DIV_MIN_RSI_DELTA = float(os.getenv("DIV_MIN_RSI_DELTA", 1.2))
 
 # Execution confirmation
-BOS_ATR_FRACTION = float(os.getenv("BOS_ATR_FRACTION", 0.10))
-CANDLE_BODY_MIN_ATR = float(os.getenv("CANDLE_BODY_MIN_ATR", 0.15))
-VOL_MULT = float(os.getenv("VOL_MULT", 1.05))
+BOS_ATR_FRACTION = float(os.getenv("BOS_ATR_FRACTION", 0.03))
+CANDLE_BODY_MIN_ATR = float(os.getenv("CANDLE_BODY_MIN_ATR", 0.08))
+VOL_MULT = float(os.getenv("VOL_MULT", 0.95))
 
 # Risk management
 STOP_METHOD = os.getenv("STOP_METHOD", "WIDER").strip().upper()
@@ -139,13 +139,13 @@ if STOP_METHOD not in ("ATR", "STRUCT", "WIDER"):
     STOP_METHOD = "WIDER"
 ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", 1.2))
 WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0005))
-MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", 0.0012))
-MIN_RR = float(os.getenv("MIN_RR", 1.8))
+MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", 0.0008))
+MIN_RR = float(os.getenv("MIN_RR", 1.35))
 TP_LOOKBACK_15M = int(os.getenv("TP_LOOKBACK_15M", 80))
 
 # One-position / cooldown behavior
-GLOBAL_COOLDOWN_SEC = int(os.getenv("GLOBAL_COOLDOWN_SEC", 1800))
-COIN_COOLDOWN_SEC = int(os.getenv("COIN_COOLDOWN_SEC", 3600))
+GLOBAL_COOLDOWN_SEC = int(os.getenv("GLOBAL_COOLDOWN_SEC", 900))
+COIN_COOLDOWN_SEC = int(os.getenv("COIN_COOLDOWN_SEC", 1800))
 WINDOW = int(os.getenv("WINDOW", 1800))
 STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 7200))
 
