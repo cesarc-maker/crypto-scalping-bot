@@ -2,7 +2,6 @@ import os
 import time
 import threading
 import logging
-from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -13,45 +12,26 @@ from flask import Flask
 from zoneinfo import ZoneInfo
 
 # ======================================================
-# MTF REVERSAL BOT — ARCHITECTURE ALIGNED TO PRIOR BOT
-# KEEP CHAT IDS FROM NEW BOT
+# SANITY CHECK 1M BOT
+# PURPOSE:
+# - verify Telegram delivery
+# - verify exchange connectivity
+# - verify cached OHLCV flow
+# - verify scanner loop / tracker loop / Flask runtime
+# - emit one test signal every new closed 1m candle
 #
-# INCLUDED:
-# - env/config setup
-# - OKX + KuCoin Futures exchange handling
-# - cached universe / movers / OHLCV fetching
-# - scanner loop + tracker loop
-# - Telegram alerts
-# - Flask keepalive
-# - one-position-at-a-time tracking
-# - per-symbol state buckets
-# - cooldowns
-# - closed-candle processing
-#
-# STRATEGY:
-# - 1H: reversal context only
-# - 15m: structure confirmation
-# - 5m: execution (divergence + BOS + candle + volume)
-#
-# ⚠️ INFO ONLY. NOT FINANCIAL ADVICE. NO EXECUTION.
-# ======================================================
-
-# ======================================================
-# LOGGING
+# THIS IS NOT A TRADING STRATEGY.
+# It intentionally produces frequent signals to validate plumbing.
 # ======================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("MTF_REVERSAL_ARCH_REWRITE")
-
-# ======================================================
-# TIME HELPERS
-# ======================================================
+log = logging.getLogger("SANITY_CHECK_1M_BOT")
 
 CT = ZoneInfo("America/Chicago")
 
 
 def ct_time_str() -> str:
-    return datetime.now(timezone.utc).astimezone(CT).strftime("%H:%M CT")
+    return datetime.now(timezone.utc).astimezone(CT).strftime("%H:%M:%S CT")
 
 
 def utc_ts() -> int:
@@ -60,8 +40,6 @@ def utc_ts() -> int:
 
 # ======================================================
 # CONFIG
-# Architecture patterned after prior bot, but strategy settings replaced
-# Chat IDs kept from new bot requirement
 # ======================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -84,176 +62,48 @@ if RAW_CHAT_IDS:
 CHAT_IDS = list(CHAT_IDS)
 
 PORT = int(os.getenv("PORT", 10000))
-
-# Cadence
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 20))
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 5))
 TRACK_INTERVAL = int(os.getenv("TRACK_INTERVAL", 10))
 
-# Exchanges (match prior bot architecture)
 EXCHANGES = os.getenv("EXCHANGES", "okx,kucoin_futures").split(",")
 EXCHANGES = [e.strip() for e in EXCHANGES if e.strip()]
 EXCHANGES = [e for e in EXCHANGES if e in ("okx", "kucoin_futures")]
 
-# Trade mode
-TRADE_MODE = os.getenv("TRADE_MODE", "both").strip().lower()
-if TRADE_MODE not in ("long_only", "short_only", "both"):
-    TRADE_MODE = "both"
-
-# Universe
-PAIR_LIMIT = int(os.getenv("PAIR_LIMIT", 260))
-TOP_MOVER_COUNT = int(os.getenv("TOP_MOVER_COUNT", 60))
-MIN_QUOTE_VOL_USDT = float(os.getenv("MIN_QUOTE_VOL_USDT", 2_500_000))
-MAX_SPREAD_BPS = float(os.getenv("MAX_SPREAD_BPS", 35))
+PAIR_LIMIT = int(os.getenv("PAIR_LIMIT", 40))
+TOP_MOVER_COUNT = int(os.getenv("TOP_MOVER_COUNT", 10))
+MIN_QUOTE_VOL_USDT = float(os.getenv("MIN_QUOTE_VOL_USDT", 1_000_000))
+MAX_SPREAD_BPS = float(os.getenv("MAX_SPREAD_BPS", 50))
 ALLOW_ONLY_ACTIVE = os.getenv("ALLOW_ONLY_ACTIVE", "1") == "1"
 USE_TOP_MOVERS_ONLY = os.getenv("USE_TOP_MOVERS_ONLY", "1") == "1"
 
-# Timeframes
-TF_EXEC = "5m"
-TF_CONFIRM = "15m"
-TF_CTX = "1h"
+TF_SIGNAL = os.getenv("TF_SIGNAL", "1m")
+OHLCV_LIMIT_1M = int(os.getenv("OHLCV_LIMIT_1M", 20))
+OHLCV_1M_TTL_SEC = int(os.getenv("OHLCV_1M_TTL_SEC", 3))
+UNIVERSE_TTL_SEC = int(os.getenv("UNIVERSE_TTL_SEC", 300))
+MOVERS_TTL_SEC = int(os.getenv("MOVERS_TTL_SEC", 20))
 
-# Indicators
-RSI_LEN = int(os.getenv("RSI_LEN", 14))
-ATR_LEN = int(os.getenv("ATR_LEN", 14))
-VOL_MA_LEN = int(os.getenv("VOL_MA_LEN", 20))
-EMA_FAST = int(os.getenv("EMA_FAST", 20))
-EMA_SLOW = int(os.getenv("EMA_SLOW", 50))
-USE_EMA_FILTER = os.getenv("USE_EMA_FILTER", "0") == "1"
+REFERENCE_SYMBOL = os.getenv("REFERENCE_SYMBOL", "").strip()
+ONE_SIGNAL_PER_CANDLE = os.getenv("ONE_SIGNAL_PER_CANDLE", "1") == "1"
+SIGNAL_MODE = os.getenv("SIGNAL_MODE", "candle_color").strip().lower()
+if SIGNAL_MODE not in ("candle_color", "alternate"):
+    SIGNAL_MODE = "candle_color"
 
-# Pivot / divergence / structure
-PIVOT_LEFT = int(os.getenv("PIVOT_LEFT", 2))
-PIVOT_RIGHT = int(os.getenv("PIVOT_RIGHT", 2))
-DIV_LOOKBACK = int(os.getenv("DIV_LOOKBACK", 60))
-DIV_MIN_SWING_SEPARATION = int(os.getenv("DIV_MIN_SWING_SEPARATION", 3))
-DIV_MIN_PRICE_DELTA_PCT = float(os.getenv("DIV_MIN_PRICE_DELTA_PCT", 0.0008))
-DIV_MIN_RSI_DELTA = float(os.getenv("DIV_MIN_RSI_DELTA", 1.2))
+TELEGRAM_API = "https://api.telegram.org"
 
-# Execution confirmation
-BOS_ATR_FRACTION = float(os.getenv("BOS_ATR_FRACTION", 0.03))
-CANDLE_BODY_MIN_ATR = float(os.getenv("CANDLE_BODY_MIN_ATR", 0.08))
-VOL_MULT = float(os.getenv("VOL_MULT", 0.95))
-
-# Risk management
-STOP_METHOD = os.getenv("STOP_METHOD", "WIDER").strip().upper()
-if STOP_METHOD not in ("ATR", "STRUCT", "WIDER"):
-    STOP_METHOD = "WIDER"
-ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", 1.2))
-WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0005))
-MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", 0.0008))
-MIN_RR = float(os.getenv("MIN_RR", 1.35))
-TP_LOOKBACK_15M = int(os.getenv("TP_LOOKBACK_15M", 80))
-
-# One-position / cooldown behavior
-GLOBAL_COOLDOWN_SEC = int(os.getenv("GLOBAL_COOLDOWN_SEC", 900))
-COIN_COOLDOWN_SEC = int(os.getenv("COIN_COOLDOWN_SEC", 1800))
-WINDOW = int(os.getenv("WINDOW", 1800))
-STOP_PENALTY_WINDOW = int(os.getenv("STOP_PENALTY_WINDOW", 7200))
-
-# Cache controls
-UNIVERSE_TTL_SEC = int(os.getenv("UNIVERSE_TTL_SEC", 15 * 60))
-MOVERS_TTL_SEC = int(os.getenv("MOVERS_TTL_SEC", 120))
-OHLCV_5M_TTL_SEC = int(os.getenv("OHLCV_5M_TTL_SEC", 15))
-OHLCV_15M_TTL_SEC = int(os.getenv("OHLCV_15M_TTL_SEC", 30))
-OHLCV_1H_TTL_SEC = int(os.getenv("OHLCV_1H_TTL_SEC", 120))
-OHLCV_LIMIT_5M = int(os.getenv("OHLCV_LIMIT_5M", 220))
-OHLCV_LIMIT_15M = int(os.getenv("OHLCV_LIMIT_15M", 220))
-OHLCV_LIMIT_1H = int(os.getenv("OHLCV_LIMIT_1H", 220))
-
-# State cleanup
-STATE_CLEANUP_EVERY_SEC = int(os.getenv("STATE_CLEANUP_EVERY_SEC", 15 * 60))
-STATE_STALE_AFTER_SEC = int(os.getenv("STATE_STALE_AFTER_SEC", 6 * 60 * 60))
 
 # ======================================================
 # STATE
-# Architecture mirrors prior bot concepts, but one active trade only
 # ======================================================
-
-recent_signals: Dict[str, float] = {}
-penalty_cooldowns: Dict[str, float] = {}
-recent_coin_calls: Dict[str, float] = {}
-
-active_trade: Optional[Dict[str, Any]] = None
-active_trade_lock = threading.Lock()
-
-closed_trades: List[Dict[str, Any]] = []
-stats_lock = threading.Lock()
 
 symbol_state: Dict[str, Dict[str, Any]] = {}
-global_cooldown_until = 0.0
-
-# ======================================================
-# HELPERS
-# ======================================================
-
-
-def norm_symbol(symbol: str) -> str:
-    return symbol.split(":")[0].strip()
-
-
-def allow_coin(symbol: str) -> bool:
-    now = time.time()
-    key = norm_symbol(symbol)
-    last = recent_coin_calls.get(key)
-    if last is not None and (now - last) < COIN_COOLDOWN_SEC:
-        return False
-    recent_coin_calls[key] = now
-    return True
-
-
-def make_trade_id(ex_name: str, symbol: str, direction: str) -> str:
-    ts = datetime.now(timezone.utc).strftime("%m%d-%H%M")
-    base = norm_symbol(symbol).replace("/", "")
-    side = "L" if direction == "LONG" else "S"
-    ex_tag = "OKX" if ex_name == "okx" else "KCF"
-    return f"{base}-{side}-{ex_tag}-{ts}"
-
-
-def fmt_price(px: float) -> str:
-    if px >= 1000:
-        return f"{px:,.2f}"
-    if px >= 1:
-        return f"{px:.4f}"
-    if px >= 0.01:
-        return f"{px:.6f}"
-    return f"{px:.8f}"
-
-
-def has_active_trade() -> bool:
-    with active_trade_lock:
-        return active_trade is not None
-
-
-def set_active_trade(trade: Dict[str, Any]) -> None:
-    global active_trade
-    with active_trade_lock:
-        active_trade = trade
-
-
-def get_active_trade() -> Optional[Dict[str, Any]]:
-    with active_trade_lock:
-        return dict(active_trade) if active_trade else None
-
-
-def clear_active_trade() -> None:
-    global active_trade
-    with active_trade_lock:
-        active_trade = None
-
-
-def in_global_cooldown() -> bool:
-    return time.time() < global_cooldown_until
-
-
-def apply_global_cooldown() -> None:
-    global global_cooldown_until
-    global_cooldown_until = time.time() + GLOBAL_COOLDOWN_SEC
+last_signal_side = "SHORT"
+heartbeat_trade: Optional[Dict[str, Any]] = None
+heartbeat_trade_lock = threading.Lock()
 
 
 # ======================================================
 # TELEGRAM
 # ======================================================
-
-TELEGRAM_API = "https://api.telegram.org"
 
 
 def send_telegram(text: str):
@@ -265,7 +115,7 @@ def send_telegram(text: str):
         return
 
     max_len = 3800
-    chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)]
+    chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)] or [text]
 
     for cid in CHAT_IDS:
         for ch in chunks:
@@ -281,55 +131,24 @@ def send_telegram(text: str):
 
 def send_startup():
     msg = (
-        "🤖 MTF REVERSAL BOT STARTED\n\n"
-        "✅ 1H: reversal context\n"
-        "✅ 15m: structure confirmation\n"
-        "✅ 5m: execution trigger\n"
-        "✅ Multi-coin futures scanning\n"
-        "✅ One position at a time\n\n"
-        f"🧊 Global cooldown: {GLOBAL_COOLDOWN_SEC // 60} min\n"
-        f"🧊 Coin cooldown: {COIN_COOLDOWN_SEC // 60} min\n"
-        f"📊 Universe mode: {'TOP MOVERS' if USE_TOP_MOVERS_ONLY else 'QUALITY UNIVERSE'}\n"
-        f"🕐 Started: {ct_time_str()}\n\n"
-        "⚠️ Info only. Not financial advice."
+        "🤖 SANITY CHECK 1M BOT STARTED\n\n"
+        "Purpose:\n"
+        "• verify Telegram delivery\n"
+        "• verify exchange connection\n"
+        "• verify OHLCV caching\n"
+        "• verify scanner loop is alive\n\n"
+        f"Exchanges: {', '.join(EXCHANGES)}\n"
+        f"Signal timeframe: {TF_SIGNAL}\n"
+        f"Signal mode: {SIGNAL_MODE}\n"
+        f"Universe mode: {'TOP MOVERS' if USE_TOP_MOVERS_ONLY else 'QUALITY UNIVERSE'}\n"
+        f"Started: {ct_time_str()}\n\n"
+        "⚠️ Test bot only. Signals are intentionally noisy."
     )
     send_telegram(msg)
 
 
 # ======================================================
-# COOLDOWNS
-# ======================================================
-
-
-def _cd_key(ex_name: str, symbol: str, direction: str) -> str:
-    return f"{ex_name}_{symbol}_{direction}"
-
-
-def allow_signal(ex_name: str, symbol: str, direction: str) -> bool:
-    now = time.time()
-    key = _cd_key(ex_name, symbol, direction)
-
-    pen_exp = penalty_cooldowns.get(key)
-    if pen_exp and now < pen_exp:
-        return False
-
-    last = recent_signals.get(key)
-    if last is None or (now - last) > WINDOW:
-        recent_signals[key] = now
-        return True
-    return False
-
-
-def apply_stop_penalty(ex_name: str, symbol: str, direction: str):
-    now = time.time()
-    key = _cd_key(ex_name, symbol, direction)
-    penalty_cooldowns[key] = now + STOP_PENALTY_WINDOW
-    recent_signals[key] = now
-    recent_coin_calls[norm_symbol(symbol)] = now
-
-
-# ======================================================
-# TTL CACHE
+# CACHE
 # ======================================================
 
 class TTLCache:
@@ -353,78 +172,6 @@ class TTLCache:
 ohlcv_cache = TTLCache()
 universe_cache = TTLCache()
 movers_cache = TTLCache()
-
-
-# ======================================================
-# INDICATORS
-# ======================================================
-
-
-def _rsi(series: pd.Series, length: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-
-    avg_gain = gain.ewm(alpha=1 / length, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / length, adjust=False).mean()
-
-    rs = avg_gain / (avg_loss.replace(0, pd.NA))
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
-
-
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    prev_close = df["close"].shift(1)
-    tr1 = df["high"] - df["low"]
-    tr2 = (df["high"] - prev_close).abs()
-    tr3 = (df["low"] - prev_close).abs()
-    df["tr"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    df["atr"] = df["tr"].rolling(ATR_LEN).mean()
-    df["vol_sma"] = df["volume"].rolling(VOL_MA_LEN).mean()
-    df["rsi"] = _rsi(df["close"], RSI_LEN)
-    df["ema_fast"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
-    df["ema_slow"] = df["close"].ewm(span=EMA_SLOW, adjust=False).mean()
-    return df
-
-
-def add_pivots(df: pd.DataFrame) -> pd.DataFrame:
-    df["pivot_high"] = False
-    df["pivot_low"] = False
-    for i in range(PIVOT_LEFT, len(df) - PIVOT_RIGHT):
-        hi = float(df["high"].iloc[i])
-        lo = float(df["low"].iloc[i])
-        prev_highs = df["high"].iloc[i - PIVOT_LEFT:i]
-        next_highs = df["high"].iloc[i + 1:i + PIVOT_RIGHT + 1]
-        prev_lows = df["low"].iloc[i - PIVOT_LEFT:i]
-        next_lows = df["low"].iloc[i + 1:i + PIVOT_RIGHT + 1]
-        if hi > float(prev_highs.max()) and hi > float(next_highs.max()):
-            df.at[df.index[i], "pivot_high"] = True
-        if lo < float(prev_lows.min()) and lo < float(next_lows.min()):
-            df.at[df.index[i], "pivot_low"] = True
-    return df
-
-
-def get_df_cached(ex_name: str, ex, symbol: str, tf: str, limit: int, ttl_sec: int) -> Optional[pd.DataFrame]:
-    key = (ex_name, symbol, tf, limit)
-    hit = ohlcv_cache.get(key)
-    if hit is not None:
-        return hit.copy()
-    try:
-        data = ex.fetch_ohlcv(symbol, tf, limit=limit)
-        df = pd.DataFrame(data, columns=["ts", "open", "high", "low", "close", "volume"])
-        df = add_indicators(df)
-        df = add_pivots(df)
-        ohlcv_cache.set(key, df, ttl_sec)
-        return df.copy()
-    except Exception as e:
-        log.error("Fetch error %s %s: %s", symbol, tf, e)
-        return None
-
-
-def confirmed_df(df: pd.DataFrame) -> pd.DataFrame:
-    if len(df) <= 5:
-        return df.iloc[0:0].copy()
-    return df.iloc[:-1].copy()
 
 
 # ======================================================
@@ -470,11 +217,11 @@ def ensure_markets_loaded(ex_name: str, ex) -> bool:
 
 
 # ======================================================
-# QUALITY UNIVERSE + MOVERS
+# UNIVERSE / MOVERS
 # ======================================================
 
 
-def build_quality_universe_from_tickers(markets, tickers) -> list:
+def build_quality_universe_from_tickers(markets, tickers) -> List[str]:
     out = []
     for symbol, t in tickers.items():
         m = markets.get(symbol)
@@ -506,6 +253,7 @@ def build_quality_universe_from_tickers(markets, tickers) -> list:
             qv = float(bv) * last
         else:
             qv = float(qv)
+
         if qv < MIN_QUOTE_VOL_USDT:
             continue
 
@@ -522,7 +270,7 @@ def build_quality_universe_from_tickers(markets, tickers) -> list:
     return [s for s, _ in out[:PAIR_LIMIT]]
 
 
-def get_quality_universe(ex_name: str, ex) -> list:
+def get_quality_universe(ex_name: str, ex) -> List[str]:
     key = ("universe", ex_name)
     hit = universe_cache.get(key)
     if hit is not None:
@@ -539,7 +287,7 @@ def get_quality_universe(ex_name: str, ex) -> list:
         return []
 
 
-def detect_top_movers_from_tickers(ex_name: str, ex) -> list:
+def detect_top_movers_from_tickers(ex_name: str, ex) -> List[str]:
     key = ("movers", ex_name)
     hit = movers_cache.get(key)
     if hit is not None:
@@ -576,478 +324,136 @@ def detect_top_movers_from_tickers(ex_name: str, ex) -> list:
 
 
 # ======================================================
-# STRATEGY HELPERS
+# OHLCV
 # ======================================================
 
 
-def pivot_high_idxs(df: pd.DataFrame) -> List[int]:
-    return [int(i) for i in df.index[df["pivot_high"]].tolist()]
-
-
-def pivot_low_idxs(df: pd.DataFrame) -> List[int]:
-    return [int(i) for i in df.index[df["pivot_low"]].tolist()]
-
-
-def detect_confirmed_higher_low(df: pd.DataFrame) -> bool:
-    lows = pivot_low_idxs(df)
-    if len(lows) < 2:
-        return False
-    i1, i2 = lows[-2], lows[-1]
-    return float(df.loc[i2, "low"]) > float(df.loc[i1, "low"])
-
-
-def detect_confirmed_lower_high(df: pd.DataFrame) -> bool:
-    highs = pivot_high_idxs(df)
-    if len(highs) < 2:
-        return False
-    i1, i2 = highs[-2], highs[-1]
-    return float(df.loc[i2, "high"]) < float(df.loc[i1, "high"])
-
-
-def detect_bullish_divergence(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    lows = pivot_low_idxs(df.tail(DIV_LOOKBACK))
-    if len(lows) < 2:
+def get_df_cached(ex_name: str, ex, symbol: str, tf: str, limit: int, ttl_sec: int) -> Optional[pd.DataFrame]:
+    key = (ex_name, symbol, tf, limit)
+    hit = ohlcv_cache.get(key)
+    if hit is not None:
+        return hit.copy()
+    try:
+        data = ex.fetch_ohlcv(symbol, tf, limit=limit)
+        df = pd.DataFrame(data, columns=["ts", "open", "high", "low", "close", "volume"])
+        ohlcv_cache.set(key, df, ttl_sec)
+        return df.copy()
+    except Exception as e:
+        log.error("Fetch error %s %s %s: %s", ex_name, symbol, tf, e)
         return None
-    i1, i2 = lows[-2], lows[-1]
-    if (i2 - i1) < DIV_MIN_SWING_SEPARATION:
-        return None
-    p1 = float(df.loc[i1, "low"])
-    p2 = float(df.loc[i2, "low"])
-    r1 = float(df.loc[i1, "rsi"])
-    r2 = float(df.loc[i2, "rsi"])
-    if p1 <= 0:
-        return None
-    price_delta_pct = (p1 - p2) / p1
-    if price_delta_pct < DIV_MIN_PRICE_DELTA_PCT:
-        return None
-    if (r2 - r1) < DIV_MIN_RSI_DELTA:
-        return None
-    return {"swing1_idx": i1, "swing2_idx": i2}
 
 
-def detect_bearish_divergence(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    highs = pivot_high_idxs(df.tail(DIV_LOOKBACK))
-    if len(highs) < 2:
-        return None
-    i1, i2 = highs[-2], highs[-1]
-    if (i2 - i1) < DIV_MIN_SWING_SEPARATION:
-        return None
-    p1 = float(df.loc[i1, "high"])
-    p2 = float(df.loc[i2, "high"])
-    r1 = float(df.loc[i1, "rsi"])
-    r2 = float(df.loc[i2, "rsi"])
-    if p1 <= 0:
-        return None
-    price_delta_pct = (p2 - p1) / p1
-    if price_delta_pct < DIV_MIN_PRICE_DELTA_PCT:
-        return None
-    if (r1 - r2) < DIV_MIN_RSI_DELTA:
-        return None
-    return {"swing1_idx": i1, "swing2_idx": i2}
-
-
-def get_1h_context(df_1h: pd.DataFrame) -> str:
-    bull_div = detect_bullish_divergence(df_1h) is not None
-    bear_div = detect_bearish_divergence(df_1h) is not None
-    higher_low = detect_confirmed_higher_low(df_1h)
-    lower_high = detect_confirmed_lower_high(df_1h)
-    bullish = bull_div or higher_low
-    bearish = bear_div or lower_high
-    if bullish and bearish:
-        return "neutral"
-    if bullish:
-        return "bullish"
-    if bearish:
-        return "bearish"
-    return "neutral"
-
-
-def get_15m_bias(df_15m: pd.DataFrame) -> str:
-    highs = pivot_high_idxs(df_15m)
-    lows = pivot_low_idxs(df_15m)
-    if len(highs) < 2 or len(lows) < 2:
-        return "neutral"
-    h1, h2 = highs[-2], highs[-1]
-    l1, l2 = lows[-2], lows[-1]
-    hh = float(df_15m.loc[h2, "high"]) > float(df_15m.loc[h1, "high"])
-    hl = float(df_15m.loc[l2, "low"]) > float(df_15m.loc[l1, "low"])
-    lh = float(df_15m.loc[h2, "high"]) < float(df_15m.loc[h1, "high"])
-    ll = float(df_15m.loc[l2, "low"]) < float(df_15m.loc[l1, "low"])
-    if hh and hl:
-        return "bullish"
-    if lh and ll:
-        return "bearish"
-    return "neutral"
-
-
-def last_pivot_high(df: pd.DataFrame) -> Optional[Tuple[int, float]]:
-    highs = pivot_high_idxs(df)
-    if not highs:
-        return None
-    idx = highs[-1]
-    return idx, float(df.loc[idx, "high"])
-
-
-def last_pivot_low(df: pd.DataFrame) -> Optional[Tuple[int, float]]:
-    lows = pivot_low_idxs(df)
-    if not lows:
-        return None
-    idx = lows[-1]
-    return idx, float(df.loc[idx, "low"])
-
-
-def low_vol_ok(df_5m: pd.DataFrame) -> bool:
-    last = df_5m.iloc[-1]
-    if pd.isna(last["vol_sma"]) or float(last["vol_sma"]) <= 0:
-        return False
-    return float(last["volume"]) >= float(last["vol_sma"]) * VOL_MULT
-
-
-def bullish_candle_confirmation(df_5m: pd.DataFrame) -> bool:
-    last = df_5m.iloc[-1]
-    atr = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
-    body = abs(float(last["close"]) - float(last["open"]))
-    return float(last["close"]) > float(last["open"]) and atr > 0 and body >= CANDLE_BODY_MIN_ATR * atr
-
-
-def bearish_candle_confirmation(df_5m: pd.DataFrame) -> bool:
-    last = df_5m.iloc[-1]
-    atr = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
-    body = abs(float(last["close"]) - float(last["open"]))
-    return float(last["close"]) < float(last["open"]) and atr > 0 and body >= CANDLE_BODY_MIN_ATR * atr
-
-
-def ema_filter_ok(df_5m: pd.DataFrame, side: str) -> bool:
-    if not USE_EMA_FILTER:
-        return True
-    last = df_5m.iloc[-1]
-    if pd.isna(last["ema_fast"]) or pd.isna(last["ema_slow"]):
-        return False
-    if side == "LONG":
-        return float(last["ema_fast"]) > float(last["ema_slow"]) and float(last["close"]) > float(last["ema_fast"])
-    return float(last["ema_fast"]) < float(last["ema_slow"]) and float(last["close"]) < float(last["ema_fast"])
-
-
-def broke_above_pivot_high(df_5m: pd.DataFrame) -> bool:
-    piv = last_pivot_high(df_5m.iloc[:-1])
-    if not piv:
-        return False
-    _, px = piv
-    last = df_5m.iloc[-1]
-    atr = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
-    return float(last["close"]) > (px + atr * BOS_ATR_FRACTION)
-
-
-def broke_below_pivot_low(df_5m: pd.DataFrame) -> bool:
-    piv = last_pivot_low(df_5m.iloc[:-1])
-    if not piv:
-        return False
-    _, px = piv
-    last = df_5m.iloc[-1]
-    atr = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
-    return float(last["close"]) < (px - atr * BOS_ATR_FRACTION)
-
-
-def previous_resistance_15m(df_15m: pd.DataFrame) -> Optional[float]:
-    highs = pivot_high_idxs(df_15m.tail(TP_LOOKBACK_15M))
-    if not highs:
-        return None
-    idx = highs[-1]
-    return float(df_15m.loc[idx, "high"])
-
-
-def previous_support_15m(df_15m: pd.DataFrame) -> Optional[float]:
-    lows = pivot_low_idxs(df_15m.tail(TP_LOOKBACK_15M))
-    if not lows:
-        return None
-    idx = lows[-1]
-    return float(df_15m.loc[idx, "low"])
+def confirmed_df(df: pd.DataFrame) -> pd.DataFrame:
+    if len(df) <= 2:
+        return df.iloc[0:0].copy()
+    return df.iloc[:-1].copy()
 
 
 # ======================================================
-# TRADE BUILDERS
+# SIGNAL GENERATION
 # ======================================================
 
 
-def choose_stop(entry: float, side: str, atr: float, struct_level: float) -> float:
-    if side == "LONG":
-        struct_stop = struct_level * (1.0 - WICK_STOP_BUFFER_PCT)
-        atr_stop = entry - ATR_STOP_MULT * atr
-        if STOP_METHOD == "ATR":
-            return atr_stop
-        if STOP_METHOD == "STRUCT":
-            return struct_stop
-        return min(struct_stop, atr_stop)
-    struct_stop = struct_level * (1.0 + WICK_STOP_BUFFER_PCT)
-    atr_stop = entry + ATR_STOP_MULT * atr
-    if STOP_METHOD == "ATR":
-        return atr_stop
-    if STOP_METHOD == "STRUCT":
-        return struct_stop
-    return max(struct_stop, atr_stop)
+def get_state_bucket(ex_name: str, symbol: str) -> Dict[str, Any]:
+    key = f"{ex_name}|{symbol}"
+    if key not in symbol_state:
+        symbol_state[key] = {"last_signal_ts": 0}
+    return symbol_state[key]
 
 
-def build_trade_long(ex_name: str, symbol: str, df_5m: pd.DataFrame, df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    last = df_5m.iloc[-1]
+def choose_symbol(ex_name: str, ex) -> Optional[str]:
+    if REFERENCE_SYMBOL:
+        return REFERENCE_SYMBOL
+    symbols = detect_top_movers_from_tickers(ex_name, ex) if USE_TOP_MOVERS_ONLY else get_quality_universe(ex_name, ex)
+    if not symbols:
+        return None
+    return symbols[0]
+
+
+def choose_side(df_1m: pd.DataFrame) -> str:
+    global last_signal_side
+    if SIGNAL_MODE == "alternate":
+        last_signal_side = "LONG" if last_signal_side == "SHORT" else "SHORT"
+        return last_signal_side
+    last = df_1m.iloc[-1]
+    if float(last["close"]) >= float(last["open"]):
+        return "LONG"
+    return "SHORT"
+
+
+def build_test_signal(ex_name: str, symbol: str, df_1m: pd.DataFrame) -> Dict[str, Any]:
+    last = df_1m.iloc[-1]
+    side = choose_side(df_1m)
     entry = float(last["close"])
-    atr = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
-    if atr <= 0:
-        return None
-    piv = last_pivot_low(df_5m.iloc[:-1])
-    if not piv:
-        return None
-    _, struct_low = piv
-    stop = choose_stop(entry, "LONG", atr, struct_low)
-    if stop <= 0 or stop >= entry:
-        return None
-    risk = entry - stop
-    if (risk / entry) < MIN_RISK_PCT:
-        return None
-    tp = previous_resistance_15m(df_15m.iloc[:-1])
-    if tp is None or tp <= entry:
-        return None
-    rr = (tp - entry) / risk
-    if rr < MIN_RR:
-        return None
-    return {
-        "trade_id": make_trade_id(ex_name, symbol, "LONG"),
+    trade = {
+        "trade_id": f"TEST-{symbol.replace('/', '').replace(':', '')}-{datetime.now(timezone.utc).strftime('%H%M%S')}",
         "ex_name": ex_name,
         "symbol": symbol,
-        "direction": "LONG",
+        "direction": side,
         "entry": entry,
-        "stop": stop,
-        "tp": tp,
-        "rr": round(rr, 2),
+        "stop": entry * (0.998 if side == 'LONG' else 1.002),
+        "tp": entry * (1.002 if side == 'LONG' else 0.998),
         "status": "ACTIVE",
         "created_ts": utc_ts(),
         "exec_ts": int(last["ts"]),
-        "context_1h": "bullish",
-        "bias_15m": "bullish",
-        "reason": "bull div + BOS above pivot high + bullish candle + volume",
+        "reason": f"sanity check 1m signal on closed candle | open={last['open']} close={last['close']}",
     }
-
-
-def build_trade_short(ex_name: str, symbol: str, df_5m: pd.DataFrame, df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    last = df_5m.iloc[-1]
-    entry = float(last["close"])
-    atr = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
-    if atr <= 0:
-        return None
-    piv = last_pivot_high(df_5m.iloc[:-1])
-    if not piv:
-        return None
-    _, struct_high = piv
-    stop = choose_stop(entry, "SHORT", atr, struct_high)
-    if stop <= entry:
-        return None
-    risk = stop - entry
-    if (risk / entry) < MIN_RISK_PCT:
-        return None
-    tp = previous_support_15m(df_15m.iloc[:-1])
-    if tp is None or tp >= entry:
-        return None
-    rr = (entry - tp) / risk
-    if rr < MIN_RR:
-        return None
-    return {
-        "trade_id": make_trade_id(ex_name, symbol, "SHORT"),
-        "ex_name": ex_name,
-        "symbol": symbol,
-        "direction": "SHORT",
-        "entry": entry,
-        "stop": stop,
-        "tp": tp,
-        "rr": round(rr, 2),
-        "status": "ACTIVE",
-        "created_ts": utc_ts(),
-        "exec_ts": int(last["ts"]),
-        "context_1h": "bearish",
-        "bias_15m": "bearish",
-        "reason": "bear div + BOS below pivot low + bearish candle + volume",
-    }
-
-
-def evaluate_long_setup(ex_name: str, symbol: str, df_1h: pd.DataFrame, df_15m: pd.DataFrame, df_5m: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    if get_1h_context(df_1h) != "bullish":
-        return None
-    if get_15m_bias(df_15m) != "bullish":
-        return None
-    if detect_bullish_divergence(df_5m) is None:
-        return None
-    if not broke_above_pivot_high(df_5m):
-        return None
-    if not bullish_candle_confirmation(df_5m):
-        return None
-    if not low_vol_ok(df_5m):
-        return None
-    if not ema_filter_ok(df_5m, "LONG"):
-        return None
-    return build_trade_long(ex_name, symbol, df_5m, df_15m)
-
-
-def evaluate_short_setup(ex_name: str, symbol: str, df_1h: pd.DataFrame, df_15m: pd.DataFrame, df_5m: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    if get_1h_context(df_1h) != "bearish":
-        return None
-    if get_15m_bias(df_15m) != "bearish":
-        return None
-    if detect_bearish_divergence(df_5m) is None:
-        return None
-    if not broke_below_pivot_low(df_5m):
-        return None
-    if not bearish_candle_confirmation(df_5m):
-        return None
-    if not low_vol_ok(df_5m):
-        return None
-    if not ema_filter_ok(df_5m, "SHORT"):
-        return None
-    return build_trade_short(ex_name, symbol, df_5m, df_15m)
-
-
-# ======================================================
-# SIGNAL MESSAGING
-# ======================================================
+    return trade
 
 
 def send_signal(trade: Dict[str, Any]):
-    emoji = "📈" if trade["direction"] == "LONG" else "📉"
+    emoji = "🟢" if trade["direction"] == "LONG" else "🔴"
     msg = (
-        f"{emoji} {trade['symbol']}\n"
-        f"{trade['direction']} — ENTRY CONFIRMED\n"
+        f"{emoji} SANITY SIGNAL\n"
+        f"{trade['symbol']} | {trade['direction']}\n"
         f"Trade ID: {trade['trade_id']}\n\n"
-        f"📍 ENTRY: {fmt_price(float(trade['entry']))}\n"
-        f"🛑 STOP: {fmt_price(float(trade['stop']))}\n"
-        f"🎯 TP: {fmt_price(float(trade['tp']))}\n"
-        f"📐 RR: {float(trade['rr']):.2f}\n\n"
-        f"1H Context: {trade['context_1h']}\n"
-        f"15m Bias: {trade['bias_15m']}\n"
+        f"Entry: {trade['entry']:.6f}\n"
+        f"Stop: {trade['stop']:.6f}\n"
+        f"TP: {trade['tp']:.6f}\n"
         f"Reason: {trade['reason']}\n"
-        f"🕐 {ct_time_str()} | {trade['ex_name'].upper()}\n\n"
-        "⚠️ Not financial advice. Info only."
+        f"Time: {ct_time_str()} | {trade['ex_name'].upper()}\n\n"
+        "⚠️ Test bot only. Not a strategy."
     )
     send_telegram(msg)
-    set_active_trade(trade)
-    log.info("Signal sent → %s %s %s", trade["ex_name"], trade["symbol"], trade["direction"])
-
-
-def send_status(ex_name: str, symbol: str, direction: str, text: str):
-    send_telegram(f"ℹ️ {symbol} {direction} ({ex_name.upper()}): {text}")
+    log.info("Sanity signal sent | %s %s %s", trade["ex_name"], trade["symbol"], trade["direction"])
+    with heartbeat_trade_lock:
+        global heartbeat_trade
+        heartbeat_trade = trade
 
 
 # ======================================================
-# TRACKER + STATS
+# TRACKER LOOP
+# Dummy lifecycle updates so you can see the bot is alive
 # ======================================================
-
-
-def _record_closed(trade: Dict[str, Any], outcome: str, exit_price: float):
-    with stats_lock:
-        closed_trades.append({
-            "trade_id": trade["trade_id"],
-            "ex": trade["ex_name"],
-            "symbol": trade["symbol"],
-            "direction": trade["direction"],
-            "outcome": outcome,
-            "exit_price": float(exit_price),
-            "closed_ts": utc_ts(),
-        })
 
 
 def tracker_loop():
     log.info("Tracker loop started.")
     while True:
         time.sleep(TRACK_INTERVAL)
-        trade = get_active_trade()
+        with heartbeat_trade_lock:
+            trade = dict(heartbeat_trade) if heartbeat_trade else None
         if not trade:
             continue
-
         try:
             ex = get_ex_cached(trade["ex_name"])
             if not ex:
                 continue
-
             ticker = ex.fetch_ticker(trade["symbol"])
             px = float(ticker.get("last") or ticker.get("close") or 0.0)
             if px <= 0:
                 continue
-
-            stop = float(trade["stop"])
-            tp = float(trade["tp"])
-            direction = trade["direction"]
-
-            if direction == "LONG" and px <= stop:
-                send_telegram(f"❌ SL HIT — {trade['symbol']} (LONG) ({trade['ex_name'].upper()})")
-                apply_stop_penalty(trade["ex_name"], trade["symbol"], "LONG")
-                _record_closed(trade, "LOSS", px)
-                clear_active_trade()
-                apply_global_cooldown()
-                continue
-
-            if direction == "SHORT" and px >= stop:
-                send_telegram(f"❌ SL HIT — {trade['symbol']} (SHORT) ({trade['ex_name'].upper()})")
-                apply_stop_penalty(trade["ex_name"], trade["symbol"], "SHORT")
-                _record_closed(trade, "LOSS", px)
-                clear_active_trade()
-                apply_global_cooldown()
-                continue
-
-            if direction == "LONG" and px >= tp:
-                send_telegram(f"🏁 TP HIT — {trade['symbol']} (LONG) ({trade['ex_name'].upper()})")
-                _record_closed(trade, "WIN", px)
-                clear_active_trade()
-                apply_global_cooldown()
-                continue
-
-            if direction == "SHORT" and px <= tp:
-                send_telegram(f"🏁 TP HIT — {trade['symbol']} (SHORT) ({trade['ex_name'].upper()})")
-                _record_closed(trade, "WIN", px)
-                clear_active_trade()
-                apply_global_cooldown()
-                continue
-
+            log.info(
+                "Heartbeat tracker | symbol=%s | side=%s | entry=%.6f | live=%.6f",
+                trade["symbol"], trade["direction"], trade["entry"], px
+            )
         except Exception as e:
             log.error("Tracker error: %s", e)
 
 
 # ======================================================
-# MAIN SCANNER LOOP
-# Architecture mirrors prior bot flow: exchanges -> movers -> symbol state
+# SCANNER LOOP
 # ======================================================
-
-
-def _get_state_bucket(ex_name: str, symbol: str) -> Dict[str, Any]:
-    skey = f"{ex_name}|{symbol}"
-    now = utc_ts()
-    if skey not in symbol_state:
-        symbol_state[skey] = {"LONG": {}, "SHORT": {}, "_last_seen_ts": now}
-    else:
-        symbol_state[skey]["_last_seen_ts"] = now
-    return symbol_state[skey]
-
-
-def _reset_side(st_side: Dict[str, Any]):
-    st_side.clear()
-
-
-_last_cleanup_ts = 0
-
-
-def cleanup_symbol_state():
-    global _last_cleanup_ts
-    now = utc_ts()
-    if (now - _last_cleanup_ts) < STATE_CLEANUP_EVERY_SEC:
-        return
-    _last_cleanup_ts = now
-
-    stale_keys = []
-    for k, v in symbol_state.items():
-        last_seen = int(v.get("_last_seen_ts", 0))
-        if last_seen and (now - last_seen) > STATE_STALE_AFTER_SEC:
-            stale_keys.append(k)
-
-    for k in stale_keys:
-        symbol_state.pop(k, None)
-
-    if stale_keys:
-        log.info("State cleanup: removed %s stale symbol buckets", len(stale_keys))
 
 
 def scanner_loop():
@@ -1055,67 +461,39 @@ def scanner_loop():
     log.info("Scanner loop started.")
 
     while True:
-        cleanup_symbol_state()
+        try:
+            for ex_name in EXCHANGES:
+                ex = get_ex_cached(ex_name)
+                if not ex:
+                    continue
+                if not ensure_markets_loaded(ex_name, ex):
+                    continue
 
-        if has_active_trade() or in_global_cooldown():
-            time.sleep(SCAN_INTERVAL)
-            continue
+                symbol = choose_symbol(ex_name, ex)
+                if not symbol:
+                    continue
 
-        for ex_name in EXCHANGES:
-            ex = get_ex_cached(ex_name)
-            if not ex:
-                continue
-            if not ensure_markets_loaded(ex_name, ex):
-                continue
+                df_1m = get_df_cached(ex_name, ex, symbol, TF_SIGNAL, OHLCV_LIMIT_1M, OHLCV_1M_TTL_SEC)
+                if df_1m is None:
+                    continue
+                df_1m = confirmed_df(df_1m)
+                if len(df_1m) < 3:
+                    continue
 
-            symbols = detect_top_movers_from_tickers(ex_name, ex) if USE_TOP_MOVERS_ONLY else get_quality_universe(ex_name, ex)
+                st = get_state_bucket(ex_name, symbol)
+                exec_ts = int(df_1m.iloc[-1]["ts"])
+                if ONE_SIGNAL_PER_CANDLE and int(st.get("last_signal_ts", 0)) == exec_ts:
+                    continue
 
-            best_candidate = None
-            best_rr = -1.0
+                st["last_signal_ts"] = exec_ts
+                trade = build_test_signal(ex_name, symbol, df_1m)
+                send_signal(trade)
 
-            for symbol in symbols:
-                try:
-                    df_5m = get_df_cached(ex_name, ex, symbol, "5m", limit=OHLCV_LIMIT_5M, ttl_sec=OHLCV_5M_TTL_SEC)
-                    df_15m = get_df_cached(ex_name, ex, symbol, "15m", limit=OHLCV_LIMIT_15M, ttl_sec=OHLCV_15M_TTL_SEC)
-                    df_1h = get_df_cached(ex_name, ex, symbol, "1h", limit=OHLCV_LIMIT_1H, ttl_sec=OHLCV_1H_TTL_SEC)
-                    if df_5m is None or df_15m is None or df_1h is None:
-                        continue
-
-                    df_5m = confirmed_df(df_5m)
-                    df_15m = confirmed_df(df_15m)
-                    df_1h = confirmed_df(df_1h)
-                    if len(df_5m) < 120 or len(df_15m) < 120 or len(df_1h) < 80:
-                        continue
-
-                    st_bucket = _get_state_bucket(ex_name, symbol)
-                    exec_ts = int(df_5m.iloc[-1]["ts"])
-
-                    if TRADE_MODE in ("both", "long_only"):
-                        stL = st_bucket["LONG"]
-                        if int(stL.get("last_exec_ts", 0)) != exec_ts:
-                            stL["last_exec_ts"] = exec_ts
-                            if allow_signal(ex_name, symbol, "LONG") and allow_coin(symbol):
-                                trade = evaluate_long_setup(ex_name, symbol, df_1h, df_15m, df_5m)
-                                if trade and trade["rr"] > best_rr:
-                                    best_candidate = trade
-                                    best_rr = float(trade["rr"])
-
-                    if TRADE_MODE in ("both", "short_only"):
-                        stS = st_bucket["SHORT"]
-                        if int(stS.get("last_exec_ts", 0)) != exec_ts:
-                            stS["last_exec_ts"] = exec_ts
-                            if allow_signal(ex_name, symbol, "SHORT") and allow_coin(symbol):
-                                trade = evaluate_short_setup(ex_name, symbol, df_1h, df_15m, df_5m)
-                                if trade and trade["rr"] > best_rr:
-                                    best_candidate = trade
-                                    best_rr = float(trade["rr"])
-
-                except Exception as e:
-                    log.error("Scanner error %s %s: %s", ex_name, symbol, e)
-
-            if best_candidate and not has_active_trade() and not in_global_cooldown():
-                send_signal(best_candidate)
+                # one test signal per scan cycle is enough
                 break
+
+        except Exception as e:
+            log.error("Scanner loop error: %s", e)
 
         time.sleep(SCAN_INTERVAL)
 
@@ -1129,7 +507,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "MTF reversal bot running — prior-bot architecture rewrite"
+    return "Sanity check 1m bot running"
 
 
 if __name__ == "__main__":
