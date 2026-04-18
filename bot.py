@@ -136,11 +136,16 @@ VOL_MULT = float(os.getenv("VOL_MULT", 0.95))
 STOP_METHOD = os.getenv("STOP_METHOD", "WIDER").strip().upper()
 if STOP_METHOD not in ("ATR", "STRUCT", "WIDER"):
     STOP_METHOD = "WIDER"
-ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", 1.2))
-WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0005))
-MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", 0.0008))
+
+# Updated defaults: looser stop placement
+ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", 1.8))
+WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0015))
+MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", 0.0005))
 MIN_RR = float(os.getenv("MIN_RR", 1.35))
 TP_LOOKBACK_15M = int(os.getenv("TP_LOOKBACK_15M", 80))
+
+# Optional tracker tolerance so tiny touches do not force immediate stop classification
+STOP_TRIGGER_BUFFER_PCT = float(os.getenv("STOP_TRIGGER_BUFFER_PCT", 0.0005))
 
 # Multi-trade behavior / cooldowns
 MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", 3))
@@ -298,6 +303,7 @@ def send_startup():
         f"✅ Max open trades: {MAX_OPEN_TRADES}\n\n"
         f"🧊 Coin cooldown: {COIN_COOLDOWN_SEC // 60} min\n"
         f"📊 Universe mode: {'TOP MOVERS' if USE_TOP_MOVERS_ONLY else 'QUALITY UNIVERSE'}\n"
+        f"🛑 Stop mode: {STOP_METHOD} | ATR x {ATR_STOP_MULT:.2f} | Wick buffer {WICK_STOP_BUFFER_PCT * 100:.2f}%\n"
         f"🕐 Started: {ct_time_str()}\n\n"
         "⚠️ Info only. Not financial advice."
     )
@@ -779,6 +785,11 @@ def previous_support_15m(df_15m: pd.DataFrame) -> Optional[float]:
 
 
 def choose_stop(entry: float, side: str, atr: float, struct_level: float) -> float:
+    """
+    WIDER mode = choose the farther stop between structure and ATR.
+    ATR mode   = ATR-only stop.
+    STRUCT mode= structure-only stop.
+    """
     if side == "LONG":
         struct_stop = struct_level * (1.0 - WICK_STOP_BUFFER_PCT)
         atr_stop = entry - ATR_STOP_MULT * atr
@@ -787,6 +798,7 @@ def choose_stop(entry: float, side: str, atr: float, struct_level: float) -> flo
         if STOP_METHOD == "STRUCT":
             return struct_stop
         return min(struct_stop, atr_stop)
+
     struct_stop = struct_level * (1.0 + WICK_STOP_BUFFER_PCT)
     atr_stop = entry + ATR_STOP_MULT * atr
     if STOP_METHOD == "ATR":
@@ -794,6 +806,16 @@ def choose_stop(entry: float, side: str, atr: float, struct_level: float) -> flo
     if STOP_METHOD == "STRUCT":
         return struct_stop
     return max(struct_stop, atr_stop)
+
+
+def stop_hit_long(px: float, stop: float) -> bool:
+    trigger = stop * (1.0 - STOP_TRIGGER_BUFFER_PCT)
+    return px <= trigger
+
+
+def stop_hit_short(px: float, stop: float) -> bool:
+    trigger = stop * (1.0 + STOP_TRIGGER_BUFFER_PCT)
+    return px >= trigger
 
 
 # ======================================================
@@ -1019,14 +1041,14 @@ def tracker_loop():
                 tp = float(trade["tp"])
                 direction = trade["direction"]
 
-                if direction == "LONG" and px <= stop:
+                if direction == "LONG" and stop_hit_long(px, stop):
                     send_telegram(f"❌ SL HIT — {trade['symbol']} (LONG) ({trade['ex_name'].upper()})")
                     apply_stop_penalty(trade["ex_name"], trade["symbol"], "LONG")
                     _record_closed(trade, "LOSS", px)
                     remove_open_trade(key)
                     continue
 
-                if direction == "SHORT" and px >= stop:
+                if direction == "SHORT" and stop_hit_short(px, stop):
                     send_telegram(f"❌ SL HIT — {trade['symbol']} (SHORT) ({trade['ex_name'].upper()})")
                     apply_stop_penalty(trade["ex_name"], trade["symbol"], "SHORT")
                     _record_closed(trade, "LOSS", px)
