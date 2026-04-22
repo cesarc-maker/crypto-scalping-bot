@@ -17,21 +17,14 @@ from zoneinfo import ZoneInfo
 # STRATEGY: 1H context + 15m structure + 5m execution
 # MODE: paper-trade / info only
 #
-# INCLUDED:
-# - env/config setup
-# - OKX + KuCoin Futures exchange handling
-# - cached universe / movers / OHLCV fetching
-# - scanner loop + tracker loop
-# - Telegram alerts
-# - Flask keepalive
-# - multi-trade tracking (capped)
-# - per-symbol state buckets
-# - cooldowns / de-dupe
-# - closed-candle processing
-#
-# TARGET PROFILE:
-# - approximately 5-8 signals per day in normal conditions
-#   depending on market volatility and exchange universe
+# UPDATED FILTERS INCLUDED:
+# - wider stop defaults
+# - tracker stop trigger buffer
+# - stronger BOS confirmation
+# - EMA filter ON by default
+# - 15m location filters (avoid longs near highs / shorts near lows)
+# - breakout hold confirmation
+# - simple exhaustion filter to avoid weak second-push setups
 #
 # ⚠️ INFO ONLY. NOT FINANCIAL ADVICE. NO EXECUTION.
 # ======================================================
@@ -64,7 +57,6 @@ def utc_ts() -> int:
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# Keep required Telegram groups by default
 DEFAULT_CHAT_IDS = ["-1003463990210", "-1003749616502"]
 CHAT_ID1 = os.getenv("CHAT_ID", "").strip()
 CHAT_ID2 = os.getenv("CHAT_ID2", "").strip()
@@ -117,7 +109,7 @@ ATR_LEN = int(os.getenv("ATR_LEN", 14))
 VOL_MA_LEN = int(os.getenv("VOL_MA_LEN", 20))
 EMA_FAST = int(os.getenv("EMA_FAST", 20))
 EMA_SLOW = int(os.getenv("EMA_SLOW", 50))
-USE_EMA_FILTER = os.getenv("USE_EMA_FILTER", "0") == "1"
+USE_EMA_FILTER = os.getenv("USE_EMA_FILTER", "1") == "1"
 
 # Pivot / divergence / structure
 PIVOT_LEFT = int(os.getenv("PIVOT_LEFT", 2))
@@ -128,23 +120,29 @@ DIV_MIN_PRICE_DELTA_PCT = float(os.getenv("DIV_MIN_PRICE_DELTA_PCT", 0.0008))
 DIV_MIN_RSI_DELTA = float(os.getenv("DIV_MIN_RSI_DELTA", 1.2))
 
 # Execution confirmation
-BOS_ATR_FRACTION = float(os.getenv("BOS_ATR_FRACTION", 0.03))
+BOS_ATR_FRACTION = float(os.getenv("BOS_ATR_FRACTION", 0.12))
 CANDLE_BODY_MIN_ATR = float(os.getenv("CANDLE_BODY_MIN_ATR", 0.08))
 VOL_MULT = float(os.getenv("VOL_MULT", 0.95))
+
+# Trade quality / location filters
+LOCATION_LOOKBACK_15M = int(os.getenv("LOCATION_LOOKBACK_15M", 20))
+MIN_DISTANCE_FROM_15M_HIGH_PCT = float(os.getenv("MIN_DISTANCE_FROM_15M_HIGH_PCT", 0.012))
+MIN_DISTANCE_FROM_15M_LOW_PCT = float(os.getenv("MIN_DISTANCE_FROM_15M_LOW_PCT", 0.012))
+USE_BREAKOUT_HOLD_FILTER = os.getenv("USE_BREAKOUT_HOLD_FILTER", "1") == "1"
+USE_EXHAUSTION_FILTER = os.getenv("USE_EXHAUSTION_FILTER", "1") == "1"
+EXHAUSTION_LOOKBACK_BARS = int(os.getenv("EXHAUSTION_LOOKBACK_BARS", 6))
+EXHAUSTION_EXCLUDE_RECENT_BARS = int(os.getenv("EXHAUSTION_EXCLUDE_RECENT_BARS", 2))
 
 # Risk management
 STOP_METHOD = os.getenv("STOP_METHOD", "WIDER").strip().upper()
 if STOP_METHOD not in ("ATR", "STRUCT", "WIDER"):
     STOP_METHOD = "WIDER"
 
-# Updated defaults: looser stop placement
 ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", 1.8))
 WICK_STOP_BUFFER_PCT = float(os.getenv("WICK_STOP_BUFFER_PCT", 0.0015))
 MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", 0.0005))
 MIN_RR = float(os.getenv("MIN_RR", 1.35))
 TP_LOOKBACK_15M = int(os.getenv("TP_LOOKBACK_15M", 80))
-
-# Optional tracker tolerance so tiny touches do not force immediate stop classification
 STOP_TRIGGER_BUFFER_PCT = float(os.getenv("STOP_TRIGGER_BUFFER_PCT", 0.0005))
 
 # Multi-trade behavior / cooldowns
@@ -169,7 +167,7 @@ STATE_STALE_AFTER_SEC = int(os.getenv("STATE_STALE_AFTER_SEC", 6 * 60 * 60))
 
 # Optional debug instrumentation
 DEBUG_REJECTIONS = os.getenv("DEBUG_REJECTIONS", "1") == "1"
-DEBUG_LOG_LIMIT_PER_CYCLE = int(os.getenv("DEBUG_LOG_LIMIT_PER_CYCLE", 30))
+DEBUG_LOG_LIMIT_PER_CYCLE = int(os.getenv("DEBUG_LOG_LIMIT_PER_CYCLE", 40))
 
 # ======================================================
 # STATE
@@ -304,6 +302,8 @@ def send_startup():
         f"🧊 Coin cooldown: {COIN_COOLDOWN_SEC // 60} min\n"
         f"📊 Universe mode: {'TOP MOVERS' if USE_TOP_MOVERS_ONLY else 'QUALITY UNIVERSE'}\n"
         f"🛑 Stop mode: {STOP_METHOD} | ATR x {ATR_STOP_MULT:.2f} | Wick buffer {WICK_STOP_BUFFER_PCT * 100:.2f}%\n"
+        f"🧭 BOS ATR frac: {BOS_ATR_FRACTION:.2f} | EMA filter: {'ON' if USE_EMA_FILTER else 'OFF'}\n"
+        f"📍 Location filters: long>{MIN_DISTANCE_FROM_15M_HIGH_PCT * 100:.2f}% from highs | short>{MIN_DISTANCE_FROM_15M_LOW_PCT * 100:.2f}% from lows\n"
         f"🕐 Started: {ct_time_str()}\n\n"
         "⚠️ Info only. Not financial advice."
     )
@@ -785,11 +785,6 @@ def previous_support_15m(df_15m: pd.DataFrame) -> Optional[float]:
 
 
 def choose_stop(entry: float, side: str, atr: float, struct_level: float) -> float:
-    """
-    WIDER mode = choose the farther stop between structure and ATR.
-    ATR mode   = ATR-only stop.
-    STRUCT mode= structure-only stop.
-    """
     if side == "LONG":
         struct_stop = struct_level * (1.0 - WICK_STOP_BUFFER_PCT)
         atr_stop = entry - ATR_STOP_MULT * atr
@@ -818,6 +813,70 @@ def stop_hit_short(px: float, stop: float) -> bool:
     return px >= trigger
 
 
+def long_location_ok(df_15m: pd.DataFrame, entry: float) -> bool:
+    lookback = min(len(df_15m), LOCATION_LOOKBACK_15M)
+    if lookback <= 0:
+        return True
+    recent_high = float(df_15m["high"].iloc[-lookback:].max())
+    distance_to_high = (recent_high - entry) / entry
+    return distance_to_high >= MIN_DISTANCE_FROM_15M_HIGH_PCT
+
+
+def short_location_ok(df_15m: pd.DataFrame, entry: float) -> bool:
+    lookback = min(len(df_15m), LOCATION_LOOKBACK_15M)
+    if lookback <= 0:
+        return True
+    recent_low = float(df_15m["low"].iloc[-lookback:].min())
+    distance_to_low = (entry - recent_low) / entry
+    return distance_to_low >= MIN_DISTANCE_FROM_15M_LOW_PCT
+
+
+def breakout_hold_long(df_5m: pd.DataFrame) -> bool:
+    if not USE_BREAKOUT_HOLD_FILTER or len(df_5m) < 4:
+        return True
+    piv = last_pivot_high(df_5m.iloc[:-2])
+    if not piv:
+        return False
+    _, px = piv
+    prev_close = float(df_5m["close"].iloc[-2])
+    return prev_close > px
+
+
+def breakout_hold_short(df_5m: pd.DataFrame) -> bool:
+    if not USE_BREAKOUT_HOLD_FILTER or len(df_5m) < 4:
+        return True
+    piv = last_pivot_low(df_5m.iloc[:-2])
+    if not piv:
+        return False
+    _, px = piv
+    prev_close = float(df_5m["close"].iloc[-2])
+    return prev_close < px
+
+
+def exhaustion_filter_long(df_5m: pd.DataFrame) -> bool:
+    if not USE_EXHAUSTION_FILTER:
+        return True
+    window_start = -(EXHAUSTION_LOOKBACK_BARS)
+    window_end = -(EXHAUSTION_EXCLUDE_RECENT_BARS)
+    if len(df_5m) < (EXHAUSTION_LOOKBACK_BARS + EXHAUSTION_EXCLUDE_RECENT_BARS + 2):
+        return True
+    prev_high = float(df_5m["high"].iloc[window_start:window_end].max())
+    last_high = float(df_5m["high"].iloc[-1])
+    return last_high > prev_high
+
+
+def exhaustion_filter_short(df_5m: pd.DataFrame) -> bool:
+    if not USE_EXHAUSTION_FILTER:
+        return True
+    window_start = -(EXHAUSTION_LOOKBACK_BARS)
+    window_end = -(EXHAUSTION_EXCLUDE_RECENT_BARS)
+    if len(df_5m) < (EXHAUSTION_LOOKBACK_BARS + EXHAUSTION_EXCLUDE_RECENT_BARS + 2):
+        return True
+    prev_low = float(df_5m["low"].iloc[window_start:window_end].min())
+    last_low = float(df_5m["low"].iloc[-1])
+    return last_low < prev_low
+
+
 # ======================================================
 # TRADE BUILDERS
 # ======================================================
@@ -828,6 +887,8 @@ def build_trade_long(ex_name: str, symbol: str, df_5m: pd.DataFrame, df_15m: pd.
     entry = float(last["close"])
     atr = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
     if atr <= 0:
+        return None
+    if not long_location_ok(df_15m.iloc[:-1], entry):
         return None
     piv = last_pivot_low(df_5m.iloc[:-1])
     if not piv:
@@ -859,7 +920,7 @@ def build_trade_long(ex_name: str, symbol: str, df_5m: pd.DataFrame, df_15m: pd.
         "exec_ts": int(last["ts"]),
         "context_1h": "bullish",
         "bias_15m": "bullish",
-        "reason": "bull div + BOS above pivot high + bullish candle + volume",
+        "reason": "bull div + BOS above pivot high + breakout hold + bullish candle + volume",
     }
 
 
@@ -868,6 +929,8 @@ def build_trade_short(ex_name: str, symbol: str, df_5m: pd.DataFrame, df_15m: pd
     entry = float(last["close"])
     atr = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
     if atr <= 0:
+        return None
+    if not short_location_ok(df_15m.iloc[:-1], entry):
         return None
     piv = last_pivot_high(df_5m.iloc[:-1])
     if not piv:
@@ -899,7 +962,7 @@ def build_trade_short(ex_name: str, symbol: str, df_5m: pd.DataFrame, df_15m: pd
         "exec_ts": int(last["ts"]),
         "context_1h": "bearish",
         "bias_15m": "bearish",
-        "reason": "bear div + BOS below pivot low + bearish candle + volume",
+        "reason": "bear div + BOS below pivot low + breakout hold + bearish candle + volume",
     }
 
 
@@ -921,6 +984,12 @@ def evaluate_long_setup(ex_name: str, symbol: str, df_1h: pd.DataFrame, df_15m: 
     if not broke_above_pivot_high(df_5m):
         debug_reject(symbol, "LONG", "no 5m BOS above pivot high")
         return None
+    if not breakout_hold_long(df_5m):
+        debug_reject(symbol, "LONG", "breakout hold filter failed")
+        return None
+    if not exhaustion_filter_long(df_5m):
+        debug_reject(symbol, "LONG", "exhaustion filter failed")
+        return None
     if not bullish_candle_confirmation(df_5m):
         debug_reject(symbol, "LONG", "bullish candle confirmation failed")
         return None
@@ -932,7 +1001,7 @@ def evaluate_long_setup(ex_name: str, symbol: str, df_1h: pd.DataFrame, df_15m: 
         return None
     trade = build_trade_long(ex_name, symbol, df_5m, df_15m)
     if trade is None:
-        debug_reject(symbol, "LONG", "trade builder rejected (risk/rr/tp/stop)")
+        debug_reject(symbol, "LONG", "trade builder rejected (location/risk/rr/tp/stop)")
     return trade
 
 
@@ -949,6 +1018,12 @@ def evaluate_short_setup(ex_name: str, symbol: str, df_1h: pd.DataFrame, df_15m:
     if not broke_below_pivot_low(df_5m):
         debug_reject(symbol, "SHORT", "no 5m BOS below pivot low")
         return None
+    if not breakout_hold_short(df_5m):
+        debug_reject(symbol, "SHORT", "breakout hold filter failed")
+        return None
+    if not exhaustion_filter_short(df_5m):
+        debug_reject(symbol, "SHORT", "exhaustion filter failed")
+        return None
     if not bearish_candle_confirmation(df_5m):
         debug_reject(symbol, "SHORT", "bearish candle confirmation failed")
         return None
@@ -960,7 +1035,7 @@ def evaluate_short_setup(ex_name: str, symbol: str, df_1h: pd.DataFrame, df_15m:
         return None
     trade = build_trade_short(ex_name, symbol, df_5m, df_15m)
     if trade is None:
-        debug_reject(symbol, "SHORT", "trade builder rejected (risk/rr/tp/stop)")
+        debug_reject(symbol, "SHORT", "trade builder rejected (location/risk/rr/tp/stop)")
     return trade
 
 
@@ -989,10 +1064,6 @@ def send_signal(trade: Dict[str, Any]):
     add_open_trade(trade)
     touch_signal(trade["ex_name"], trade["symbol"], trade["direction"])
     log.info("Signal sent → %s %s %s", trade["ex_name"], trade["symbol"], trade["direction"])
-
-
-def send_status(ex_name: str, symbol: str, direction: str, text: str):
-    send_telegram(f"ℹ️ {symbol} {direction} ({ex_name.upper()}): {text}")
 
 
 # ======================================================
@@ -1086,10 +1157,6 @@ def _get_state_bucket(ex_name: str, symbol: str) -> Dict[str, Any]:
     return symbol_state[skey]
 
 
-def _reset_side(st_side: Dict[str, Any]):
-    st_side.clear()
-
-
 _last_cleanup_ts = 0
 
 
@@ -1136,7 +1203,6 @@ def scanner_loop():
                 continue
 
             symbols = detect_top_movers_from_tickers(ex_name, ex) if USE_TOP_MOVERS_ONLY else get_quality_universe(ex_name, ex)
-
             candidates: List[Dict[str, Any]] = []
 
             for symbol in symbols:
@@ -1144,9 +1210,9 @@ def scanner_loop():
                     if not can_open_more_trades():
                         break
 
-                    df_5m = get_df_cached(ex_name, ex, symbol, "5m", limit=OHLCV_LIMIT_5M, ttl_sec=OHLCV_5M_TTL_SEC)
-                    df_15m = get_df_cached(ex_name, ex, symbol, "15m", limit=OHLCV_LIMIT_15M, ttl_sec=OHLCV_15M_TTL_SEC)
-                    df_1h = get_df_cached(ex_name, ex, symbol, "1h", limit=OHLCV_LIMIT_1H, ttl_sec=OHLCV_1H_TTL_SEC)
+                    df_5m = get_df_cached(ex_name, ex, symbol, TF_EXEC, limit=OHLCV_LIMIT_5M, ttl_sec=OHLCV_5M_TTL_SEC)
+                    df_15m = get_df_cached(ex_name, ex, symbol, TF_CONFIRM, limit=OHLCV_LIMIT_15M, ttl_sec=OHLCV_15M_TTL_SEC)
+                    df_1h = get_df_cached(ex_name, ex, symbol, TF_CTX, limit=OHLCV_LIMIT_1H, ttl_sec=OHLCV_1H_TTL_SEC)
                     if df_5m is None or df_15m is None or df_1h is None:
                         continue
 
