@@ -297,21 +297,35 @@ def send_telegram(text: str):
 
 def send_startup():
     msg = (
-        "🤖 MTF REVERSAL BOT STARTED\n\n"
-        "✅ 1H: reversal context\n"
-        "✅ 15m: structure confirmation\n"
-        "✅ 5m: execution trigger\n"
-        "✅ Multi-coin futures scanning\n"
-        f"✅ Max open trades: {MAX_OPEN_TRADES}\n\n"
-        f"🧊 Coin cooldown: {COIN_COOLDOWN_SEC // 60} min\n"
-        f"📊 Universe mode: {'TOP MOVERS' if USE_TOP_MOVERS_ONLY else 'QUALITY UNIVERSE'}\n"
-        f"🛑 Stop mode: {STOP_METHOD} | ATR x {ATR_STOP_MULT:.2f} | Wick buffer {WICK_STOP_BUFFER_PCT * 100:.2f}%\n"
+        "🤖 MTF REVERSAL BOT STARTED
+
+"
+        "✅ 1H: reversal context
+"
+        "✅ 15m: structure confirmation
+"
+        "✅ 5m: execution trigger
+"
+        "✅ Multi-coin futures scanning
+"
+        f"✅ Max open trades: {MAX_OPEN_TRADES}
+
+"
+        f"🧊 Coin cooldown: {COIN_COOLDOWN_SEC // 60} min
+"
+        f"📊 Universe mode: {'TOP MOVERS' if USE_TOP_MOVERS_ONLY else 'QUALITY UNIVERSE'}
+"
+        f"🛑 Stop mode: {STOP_METHOD} | ATR x {ATR_STOP_MULT:.2f} | Wick buffer {WICK_STOP_BUFFER_PCT * 100:.2f}%
+"
         f"🧭 BOS ATR frac: {BOS_ATR_FRACTION:.2f} | EMA filter: {'ON' if USE_EMA_FILTER else 'OFF'}
 "
         f"🧱 4H soft veto: {'ON' if USE_4H_SOFT_VETO else 'OFF'}
 "
-        f"📍 Location filters: long>{MIN_DISTANCE_FROM_15M_HIGH_PCT * 100:.2f}% from highs | short>{MIN_DISTANCE_FROM_15M_LOW_PCT * 100:.2f}% from lows\n"
-        f"🕐 Started: {ct_time_str()}\n\n"
+        f"📍 Location filters: long>{MIN_DISTANCE_FROM_15M_HIGH_PCT * 100:.2f}% from highs | short>{MIN_DISTANCE_FROM_15M_LOW_PCT * 100:.2f}% from lows
+"
+        f"🕐 Started: {ct_time_str()}
+
+"
         "⚠️ Info only. Not financial advice."
     )
     send_telegram(msg)
