@@ -102,6 +102,7 @@ USE_TOP_MOVERS_ONLY = os.getenv("USE_TOP_MOVERS_ONLY", "1") == "1"
 TF_EXEC = "5m"
 TF_CONFIRM = "15m"
 TF_CTX = "1h"
+TF_REGIME = "4h"
 
 # Indicators
 RSI_LEN = int(os.getenv("RSI_LEN", 14))
@@ -120,14 +121,14 @@ DIV_MIN_PRICE_DELTA_PCT = float(os.getenv("DIV_MIN_PRICE_DELTA_PCT", 0.0008))
 DIV_MIN_RSI_DELTA = float(os.getenv("DIV_MIN_RSI_DELTA", 1.2))
 
 # Execution confirmation
-BOS_ATR_FRACTION = float(os.getenv("BOS_ATR_FRACTION", 0.12))
+BOS_ATR_FRACTION = float(os.getenv("BOS_ATR_FRACTION", 0.08))
 CANDLE_BODY_MIN_ATR = float(os.getenv("CANDLE_BODY_MIN_ATR", 0.08))
 VOL_MULT = float(os.getenv("VOL_MULT", 0.95))
 
 # Trade quality / location filters
 LOCATION_LOOKBACK_15M = int(os.getenv("LOCATION_LOOKBACK_15M", 20))
-MIN_DISTANCE_FROM_15M_HIGH_PCT = float(os.getenv("MIN_DISTANCE_FROM_15M_HIGH_PCT", 0.012))
-MIN_DISTANCE_FROM_15M_LOW_PCT = float(os.getenv("MIN_DISTANCE_FROM_15M_LOW_PCT", 0.012))
+MIN_DISTANCE_FROM_15M_HIGH_PCT = float(os.getenv("MIN_DISTANCE_FROM_15M_HIGH_PCT", 0.006))
+MIN_DISTANCE_FROM_15M_LOW_PCT = float(os.getenv("MIN_DISTANCE_FROM_15M_LOW_PCT", 0.006))
 USE_BREAKOUT_HOLD_FILTER = os.getenv("USE_BREAKOUT_HOLD_FILTER", "1") == "1"
 USE_EXHAUSTION_FILTER = os.getenv("USE_EXHAUSTION_FILTER", "1") == "1"
 EXHAUSTION_LOOKBACK_BARS = int(os.getenv("EXHAUSTION_LOOKBACK_BARS", 6))
@@ -157,9 +158,12 @@ MOVERS_TTL_SEC = int(os.getenv("MOVERS_TTL_SEC", 120))
 OHLCV_5M_TTL_SEC = int(os.getenv("OHLCV_5M_TTL_SEC", 15))
 OHLCV_15M_TTL_SEC = int(os.getenv("OHLCV_15M_TTL_SEC", 30))
 OHLCV_1H_TTL_SEC = int(os.getenv("OHLCV_1H_TTL_SEC", 120))
+OHLCV_4H_TTL_SEC = int(os.getenv("OHLCV_4H_TTL_SEC", 300))
 OHLCV_LIMIT_5M = int(os.getenv("OHLCV_LIMIT_5M", 220))
 OHLCV_LIMIT_15M = int(os.getenv("OHLCV_LIMIT_15M", 220))
 OHLCV_LIMIT_1H = int(os.getenv("OHLCV_LIMIT_1H", 220))
+OHLCV_LIMIT_4H = int(os.getenv("OHLCV_LIMIT_4H", 220))
+USE_4H_SOFT_VETO = os.getenv("USE_4H_SOFT_VETO", "1") == "1"
 
 # State cleanup
 STATE_CLEANUP_EVERY_SEC = int(os.getenv("STATE_CLEANUP_EVERY_SEC", 15 * 60))
@@ -302,7 +306,10 @@ def send_startup():
         f"🧊 Coin cooldown: {COIN_COOLDOWN_SEC // 60} min\n"
         f"📊 Universe mode: {'TOP MOVERS' if USE_TOP_MOVERS_ONLY else 'QUALITY UNIVERSE'}\n"
         f"🛑 Stop mode: {STOP_METHOD} | ATR x {ATR_STOP_MULT:.2f} | Wick buffer {WICK_STOP_BUFFER_PCT * 100:.2f}%\n"
-        f"🧭 BOS ATR frac: {BOS_ATR_FRACTION:.2f} | EMA filter: {'ON' if USE_EMA_FILTER else 'OFF'}\n"
+        f"🧭 BOS ATR frac: {BOS_ATR_FRACTION:.2f} | EMA filter: {'ON' if USE_EMA_FILTER else 'OFF'}
+"
+        f"🧱 4H soft veto: {'ON' if USE_4H_SOFT_VETO else 'OFF'}
+"
         f"📍 Location filters: long>{MIN_DISTANCE_FROM_15M_HIGH_PCT * 100:.2f}% from highs | short>{MIN_DISTANCE_FROM_15M_LOW_PCT * 100:.2f}% from lows\n"
         f"🕐 Started: {ct_time_str()}\n\n"
         "⚠️ Info only. Not financial advice."
@@ -971,11 +978,20 @@ def build_trade_short(ex_name: str, symbol: str, df_5m: pd.DataFrame, df_15m: pd
 # ======================================================
 
 
-def evaluate_long_setup(ex_name: str, symbol: str, df_1h: pd.DataFrame, df_15m: pd.DataFrame, df_5m: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    if get_1h_context(df_1h) != "bullish":
-        debug_reject(symbol, "LONG", "1H context not bullish")
+def evaluate_long_setup(ex_name: str, symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, df_15m: pd.DataFrame, df_5m: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    ctx_4h = get_1h_context(df_4h)
+    ctx_1h = get_1h_context(df_1h)
+    bias_15m = get_15m_bias(df_15m)
+
+    if USE_4H_SOFT_VETO and ctx_4h == "bearish" and ctx_1h != "bullish":
+        debug_reject(symbol, "LONG", "4H bearish soft veto")
         return None
-    if get_15m_bias(df_15m) != "bullish":
+
+    if ctx_1h == "bearish" and bias_15m != "bullish":
+        debug_reject(symbol, "LONG", "1H bearish and 15m not bullish")
+        return None
+
+    if bias_15m != "bullish":
         debug_reject(symbol, "LONG", "15m bias not bullish")
         return None
     if detect_bullish_divergence(df_5m) is None:
@@ -1005,11 +1021,20 @@ def evaluate_long_setup(ex_name: str, symbol: str, df_1h: pd.DataFrame, df_15m: 
     return trade
 
 
-def evaluate_short_setup(ex_name: str, symbol: str, df_1h: pd.DataFrame, df_15m: pd.DataFrame, df_5m: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    if get_1h_context(df_1h) != "bearish":
-        debug_reject(symbol, "SHORT", "1H context not bearish")
+def evaluate_short_setup(ex_name: str, symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, df_15m: pd.DataFrame, df_5m: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    ctx_4h = get_1h_context(df_4h)
+    ctx_1h = get_1h_context(df_1h)
+    bias_15m = get_15m_bias(df_15m)
+
+    if USE_4H_SOFT_VETO and ctx_4h == "bullish" and ctx_1h != "bearish":
+        debug_reject(symbol, "SHORT", "4H bullish soft veto")
         return None
-    if get_15m_bias(df_15m) != "bearish":
+
+    if ctx_1h == "bullish" and bias_15m != "bearish":
+        debug_reject(symbol, "SHORT", "1H bullish and 15m not bearish")
+        return None
+
+    if bias_15m != "bearish":
         debug_reject(symbol, "SHORT", "15m bias not bearish")
         return None
     if detect_bearish_divergence(df_5m) is None:
@@ -1213,13 +1238,15 @@ def scanner_loop():
                     df_5m = get_df_cached(ex_name, ex, symbol, TF_EXEC, limit=OHLCV_LIMIT_5M, ttl_sec=OHLCV_5M_TTL_SEC)
                     df_15m = get_df_cached(ex_name, ex, symbol, TF_CONFIRM, limit=OHLCV_LIMIT_15M, ttl_sec=OHLCV_15M_TTL_SEC)
                     df_1h = get_df_cached(ex_name, ex, symbol, TF_CTX, limit=OHLCV_LIMIT_1H, ttl_sec=OHLCV_1H_TTL_SEC)
-                    if df_5m is None or df_15m is None or df_1h is None:
+                    df_4h = get_df_cached(ex_name, ex, symbol, TF_REGIME, limit=OHLCV_LIMIT_4H, ttl_sec=OHLCV_4H_TTL_SEC)
+                    if df_5m is None or df_15m is None or df_1h is None or df_4h is None:
                         continue
 
                     df_5m = confirmed_df(df_5m)
                     df_15m = confirmed_df(df_15m)
                     df_1h = confirmed_df(df_1h)
-                    if len(df_5m) < 120 or len(df_15m) < 120 or len(df_1h) < 80:
+                    df_4h = confirmed_df(df_4h)
+                    if len(df_5m) < 120 or len(df_15m) < 120 or len(df_1h) < 80 or len(df_4h) < 80:
                         continue
 
                     st_bucket = _get_state_bucket(ex_name, symbol)
@@ -1230,7 +1257,7 @@ def scanner_loop():
                         if int(stL.get("last_exec_ts", 0)) != exec_ts:
                             stL["last_exec_ts"] = exec_ts
                             if allow_signal(ex_name, symbol, "LONG") and allow_coin(symbol):
-                                trade = evaluate_long_setup(ex_name, symbol, df_1h, df_15m, df_5m)
+                                trade = evaluate_long_setup(ex_name, symbol, df_4h, df_1h, df_15m, df_5m)
                                 if trade:
                                     candidates.append(trade)
                             else:
@@ -1241,7 +1268,7 @@ def scanner_loop():
                         if int(stS.get("last_exec_ts", 0)) != exec_ts:
                             stS["last_exec_ts"] = exec_ts
                             if allow_signal(ex_name, symbol, "SHORT") and allow_coin(symbol):
-                                trade = evaluate_short_setup(ex_name, symbol, df_1h, df_15m, df_5m)
+                                trade = evaluate_short_setup(ex_name, symbol, df_4h, df_1h, df_15m, df_5m)
                                 if trade:
                                     candidates.append(trade)
                             else:
