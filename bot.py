@@ -30,8 +30,12 @@ from zoneinfo import ZoneInfo
 # - closed-candle processing
 #
 # TARGET PROFILE:
-# - approximately 5-8 signals per day in normal conditions
-#   depending on market volatility and exchange universe
+# - tuned for approximately 1-2 higher-quality signals per day
+#   depending on volatility and exchange universe
+# - 4H/1H are context, not hard vetoes
+# - 15m accepts established OR transitional reversal structure
+# - 5m divergence + BOS remain mandatory
+# - secondary confirmations are quality-scored
 #
 # ⚠️ INFO ONLY. NOT FINANCIAL ADVICE. NO EXECUTION.
 # ======================================================
@@ -125,13 +129,18 @@ PIVOT_LEFT = int(os.getenv("PIVOT_LEFT", 2))
 PIVOT_RIGHT = int(os.getenv("PIVOT_RIGHT", 2))
 DIV_LOOKBACK = int(os.getenv("DIV_LOOKBACK", 60))
 DIV_MIN_SWING_SEPARATION = int(os.getenv("DIV_MIN_SWING_SEPARATION", 3))
-DIV_MIN_PRICE_DELTA_PCT = float(os.getenv("DIV_MIN_PRICE_DELTA_PCT", 0.0008))
-DIV_MIN_RSI_DELTA = float(os.getenv("DIV_MIN_RSI_DELTA", 1.2))
+DIV_MIN_PRICE_DELTA_PCT = float(os.getenv("DIV_MIN_PRICE_DELTA_PCT", 0.0005))
+DIV_MIN_RSI_DELTA = float(os.getenv("DIV_MIN_RSI_DELTA", 0.8))
 
 # Execution confirmation
 BOS_ATR_FRACTION = float(os.getenv("BOS_ATR_FRACTION", 0.08))
 CANDLE_BODY_MIN_ATR = float(os.getenv("CANDLE_BODY_MIN_ATR", 0.08))
 VOL_MULT = float(os.getenv("VOL_MULT", 0.95))
+
+# Quality scoring
+# Mandatory: 15m reversal structure + 5m divergence + 5m BOS + valid trade builder
+# Secondary factors: breakout hold, exhaustion, candle, volume, EMA, HTF context
+MIN_QUALITY_SCORE = int(os.getenv("MIN_QUALITY_SCORE", 3))
 
 # Trade quality / location filters
 LOCATION_LOOKBACK_15M = int(os.getenv("LOCATION_LOOKBACK_15M", 20))
@@ -170,7 +179,7 @@ OHLCV_LIMIT_5M = int(os.getenv("OHLCV_LIMIT_5M", 220))
 OHLCV_LIMIT_15M = int(os.getenv("OHLCV_LIMIT_15M", 220))
 OHLCV_LIMIT_1H = int(os.getenv("OHLCV_LIMIT_1H", 220))
 OHLCV_LIMIT_4H = int(os.getenv("OHLCV_LIMIT_4H", 220))
-USE_4H_SOFT_VETO = os.getenv("USE_4H_SOFT_VETO", "1") == "1"
+USE_4H_SOFT_VETO = os.getenv("USE_4H_SOFT_VETO", "0") == "1"  # compatibility only; 4H is context-scored
 
 # State cleanup
 STATE_CLEANUP_EVERY_SEC = int(os.getenv("STATE_CLEANUP_EVERY_SEC", 15 * 60))
@@ -316,7 +325,7 @@ def send_startup():
         f"Universe mode: {'TOP MOVERS' if USE_TOP_MOVERS_ONLY else 'QUALITY UNIVERSE'}",
         f"Stop mode: {STOP_METHOD} | ATR x {ATR_STOP_MULT:.2f} | Wick buffer {WICK_STOP_BUFFER_PCT * 100:.2f}%",
         f"BOS ATR frac: {BOS_ATR_FRACTION:.2f} | EMA filter: {'ON' if USE_EMA_FILTER else 'OFF'}",
-        f"4H soft veto: {'ON' if USE_4H_SOFT_VETO else 'OFF'}",
+        f"4H regime: CONTEXT ONLY | Quality threshold: {MIN_QUALITY_SCORE}/6",
         f"Location filters: long>{MIN_DISTANCE_FROM_15M_HIGH_PCT * 100:.2f}% from highs | short>{MIN_DISTANCE_FROM_15M_LOW_PCT * 100:.2f}% from lows",
         f"Started: {ct_time_str()}",
         "",
@@ -715,6 +724,49 @@ def get_15m_bias(df_15m: pd.DataFrame) -> str:
     return "neutral"
 
 
+
+def bullish_15m_transition(df_15m: pd.DataFrame) -> bool:
+    """
+    Accept an established bullish structure OR an early bullish reversal:
+    - strict HH + HL
+    - confirmed higher low
+    - latest confirmed close breaks above the prior 15m pivot high
+    """
+    if len(df_15m) < 6:
+        return False
+    if get_15m_bias(df_15m) == "bullish":
+        return True
+    if detect_confirmed_higher_low(df_15m):
+        return True
+
+    prior = last_pivot_high(df_15m.iloc[:-1])
+    if prior is not None:
+        _, px = prior
+        return float(df_15m.iloc[-1]["close"]) > px
+    return False
+
+
+def bearish_15m_transition(df_15m: pd.DataFrame) -> bool:
+    """
+    Accept an established bearish structure OR an early bearish reversal:
+    - strict LH + LL
+    - confirmed lower high
+    - latest confirmed close breaks below the prior 15m pivot low
+    """
+    if len(df_15m) < 6:
+        return False
+    if get_15m_bias(df_15m) == "bearish":
+        return True
+    if detect_confirmed_lower_high(df_15m):
+        return True
+
+    prior = last_pivot_low(df_15m.iloc[:-1])
+    if prior is not None:
+        _, px = prior
+        return float(df_15m.iloc[-1]["close"]) < px
+    return False
+
+
 def last_pivot_high(df: pd.DataFrame) -> Optional[Tuple[int, float]]:
     highs = pivot_high_idxs(df)
     if not highs:
@@ -899,6 +951,63 @@ def exhaustion_filter_short(df_5m: pd.DataFrame) -> bool:
 
 
 
+
+def raw_ema_alignment(df_5m: pd.DataFrame, side: str) -> bool:
+    last = df_5m.iloc[-1]
+    if pd.isna(last["ema_fast"]) or pd.isna(last["ema_slow"]):
+        return False
+    if side == "LONG":
+        return float(last["ema_fast"]) > float(last["ema_slow"]) and float(last["close"]) > float(last["ema_fast"])
+    return float(last["ema_fast"]) < float(last["ema_slow"]) and float(last["close"]) < float(last["ema_fast"])
+
+
+def quality_score(
+    side: str,
+    df_4h: pd.DataFrame,
+    df_1h: pd.DataFrame,
+    df_5m: pd.DataFrame,
+) -> Tuple[int, List[str]]:
+    """
+    Score six secondary confirmations. These do NOT replace the mandatory
+    15m structure, 5m divergence, 5m BOS, and valid RR/location/stop rules.
+    """
+    ctx_4h = get_1h_context(df_4h)
+    ctx_1h = get_1h_context(df_1h)
+    checks: List[Tuple[str, bool]] = []
+
+    if side == "LONG":
+        checks = [
+            ("breakout_hold", breakout_hold_long(df_5m)),
+            ("exhaustion", exhaustion_filter_long(df_5m)),
+            ("bull_candle", bullish_candle_confirmation(df_5m)),
+            ("volume", low_vol_ok(df_5m)),
+            ("ema", raw_ema_alignment(df_5m, "LONG")),
+            ("htf_context", ctx_1h == "bullish" or ctx_4h == "bullish"),
+        ]
+    else:
+        checks = [
+            ("breakout_hold", breakout_hold_short(df_5m)),
+            ("exhaustion", exhaustion_filter_short(df_5m)),
+            ("bear_candle", bearish_candle_confirmation(df_5m)),
+            ("volume", low_vol_ok(df_5m)),
+            ("ema", raw_ema_alignment(df_5m, "SHORT")),
+            ("htf_context", ctx_1h == "bearish" or ctx_4h == "bearish"),
+        ]
+
+    passed = [name for name, ok in checks if ok]
+    return len(passed), passed
+
+
+def quality_grade(score: int) -> str:
+    if score >= 5:
+        return "A+"
+    if score == 4:
+        return "A"
+    if score == 3:
+        return "B"
+    return "C"
+
+
 # ======================================================
 # TRADE BUILDERS
 # ======================================================
@@ -996,82 +1105,84 @@ def build_trade_short(ex_name: str, symbol: str, df_5m: pd.DataFrame, df_15m: pd
 def evaluate_long_setup(ex_name: str, symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, df_15m: pd.DataFrame, df_5m: pd.DataFrame) -> Optional[Dict[str, Any]]:
     ctx_4h = get_1h_context(df_4h)
     ctx_1h = get_1h_context(df_1h)
-    bias_15m = get_15m_bias(df_15m)
+    strict_15m = get_15m_bias(df_15m)
 
-    if USE_4H_SOFT_VETO and ctx_4h == "bearish" and ctx_1h != "bullish":
-        debug_reject(symbol, "LONG", "4H bearish soft veto")
+    # Mandatory #1: established or transitional 15m bullish structure.
+    if not bullish_15m_transition(df_15m):
+        debug_reject(symbol, "LONG", "15m bullish/reversal structure missing")
         return None
-    if ctx_1h == "bearish" and bias_15m != "bullish":
-        debug_reject(symbol, "LONG", "1H bearish and 15m not bullish")
-        return None
-    if bias_15m != "bullish":
-        debug_reject(symbol, "LONG", "15m bias not bullish")
-        return None
+
+    # Mandatory #2: 5m bullish RSI divergence.
     if detect_bullish_divergence(df_5m) is None:
         debug_reject(symbol, "LONG", "no 5m bullish divergence")
         return None
+
+    # Mandatory #3: 5m break of structure.
     if not broke_above_pivot_high(df_5m):
         debug_reject(symbol, "LONG", "no 5m BOS above pivot high")
         return None
-    if not breakout_hold_long(df_5m):
-        debug_reject(symbol, "LONG", "breakout hold filter failed")
+
+    # Secondary confirmations are scored instead of acting as hard vetoes.
+    score, passed = quality_score("LONG", df_4h, df_1h, df_5m)
+    if score < MIN_QUALITY_SCORE:
+        debug_reject(symbol, "LONG", f"quality score {score}/6 below {MIN_QUALITY_SCORE}")
         return None
-    if not exhaustion_filter_long(df_5m):
-        debug_reject(symbol, "LONG", "exhaustion filter failed")
-        return None
-    if not bullish_candle_confirmation(df_5m):
-        debug_reject(symbol, "LONG", "bullish candle confirmation failed")
-        return None
-    if not low_vol_ok(df_5m):
-        debug_reject(symbol, "LONG", "volume filter failed")
-        return None
-    if not ema_filter_ok(df_5m, "LONG"):
-        debug_reject(symbol, "LONG", "EMA filter failed")
-        return None
+
+    # Mandatory #4: location, stop, TP, and RR builder.
     trade = build_trade_long(ex_name, symbol, df_5m, df_15m)
     if trade is None:
         debug_reject(symbol, "LONG", "trade builder rejected (location/risk/rr/tp/stop)")
+        return None
+
+    trade["context_1h"] = ctx_1h
+    trade["context_4h"] = ctx_4h
+    trade["bias_15m"] = strict_15m if strict_15m != "neutral" else "bullish transition"
+    trade["quality_score"] = score
+    trade["quality_grade"] = quality_grade(score)
+    trade["quality_factors"] = passed
+    trade["reason"] = "15m reversal structure + 5m bull divergence + BOS"
     return trade
 
 
 def evaluate_short_setup(ex_name: str, symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, df_15m: pd.DataFrame, df_5m: pd.DataFrame) -> Optional[Dict[str, Any]]:
     ctx_4h = get_1h_context(df_4h)
     ctx_1h = get_1h_context(df_1h)
-    bias_15m = get_15m_bias(df_15m)
+    strict_15m = get_15m_bias(df_15m)
 
-    if USE_4H_SOFT_VETO and ctx_4h == "bullish" and ctx_1h != "bearish":
-        debug_reject(symbol, "SHORT", "4H bullish soft veto")
+    # Mandatory #1: established or transitional 15m bearish structure.
+    if not bearish_15m_transition(df_15m):
+        debug_reject(symbol, "SHORT", "15m bearish/reversal structure missing")
         return None
-    if ctx_1h == "bullish" and bias_15m != "bearish":
-        debug_reject(symbol, "SHORT", "1H bullish and 15m not bearish")
-        return None
-    if bias_15m != "bearish":
-        debug_reject(symbol, "SHORT", "15m bias not bearish")
-        return None
+
+    # Mandatory #2: 5m bearish RSI divergence.
     if detect_bearish_divergence(df_5m) is None:
         debug_reject(symbol, "SHORT", "no 5m bearish divergence")
         return None
+
+    # Mandatory #3: 5m break of structure.
     if not broke_below_pivot_low(df_5m):
         debug_reject(symbol, "SHORT", "no 5m BOS below pivot low")
         return None
-    if not breakout_hold_short(df_5m):
-        debug_reject(symbol, "SHORT", "breakout hold filter failed")
+
+    # Secondary confirmations are scored instead of acting as hard vetoes.
+    score, passed = quality_score("SHORT", df_4h, df_1h, df_5m)
+    if score < MIN_QUALITY_SCORE:
+        debug_reject(symbol, "SHORT", f"quality score {score}/6 below {MIN_QUALITY_SCORE}")
         return None
-    if not exhaustion_filter_short(df_5m):
-        debug_reject(symbol, "SHORT", "exhaustion filter failed")
-        return None
-    if not bearish_candle_confirmation(df_5m):
-        debug_reject(symbol, "SHORT", "bearish candle confirmation failed")
-        return None
-    if not low_vol_ok(df_5m):
-        debug_reject(symbol, "SHORT", "volume filter failed")
-        return None
-    if not ema_filter_ok(df_5m, "SHORT"):
-        debug_reject(symbol, "SHORT", "EMA filter failed")
-        return None
+
+    # Mandatory #4: location, stop, TP, and RR builder.
     trade = build_trade_short(ex_name, symbol, df_5m, df_15m)
     if trade is None:
         debug_reject(symbol, "SHORT", "trade builder rejected (location/risk/rr/tp/stop)")
+        return None
+
+    trade["context_1h"] = ctx_1h
+    trade["context_4h"] = ctx_4h
+    trade["bias_15m"] = strict_15m if strict_15m != "neutral" else "bearish transition"
+    trade["quality_score"] = score
+    trade["quality_grade"] = quality_grade(score)
+    trade["quality_factors"] = passed
+    trade["reason"] = "15m reversal structure + 5m bear divergence + BOS"
     return trade
 
 
@@ -1090,8 +1201,11 @@ def send_signal(trade: Dict[str, Any]):
         f"🛑 STOP: {fmt_price(float(trade['stop']))}\n"
         f"🎯 TP: {fmt_price(float(trade['tp']))}\n"
         f"📐 RR: {float(trade['rr']):.2f}\n\n"
+        f"Quality: {trade.get('quality_grade', '?')} ({trade.get('quality_score', 0)}/6)\n"
+        f"4H Context: {trade.get('context_4h', 'neutral')}\n"
         f"1H Context: {trade['context_1h']}\n"
         f"15m Bias: {trade['bias_15m']}\n"
+        f"Factors: {', '.join(trade.get('quality_factors', []))}\n"
         f"Reason: {trade['reason']}\n"
         f"🕐 {ct_time_str()} | {trade['ex_name'].upper()}\n\n"
         "⚠️ Not financial advice. Info only."
